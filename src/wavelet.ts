@@ -14,6 +14,7 @@ export function rickerWavelet(t: number): number {
  * comparable across scales.
  */
 function makeKernel(a: number, numPoints: number): number[] {
+  if (a <= 0) throw new Error(`Invalid scale: ${a}`);
   // Cap kernel half-width: 4*a but no more than half the signal
   const halfWidth = Math.ceil(4 * a);
   const half = Math.min(halfWidth, Math.ceil(numPoints / 2), 256);
@@ -53,10 +54,11 @@ export function computeCWT(
 ): WaveletCoefficients {
   const N = signal.length;
   const coefficients: number[][] = [];
+  const usedScales: number[] = [];
 
   // Early return for empty signal
   if (N === 0) {
-    return { scales, coefficients };
+    return { scales: [...scales], coefficients };
   }
 
   for (const a of scales) {
@@ -76,9 +78,10 @@ export function computeCWT(
     }
 
     coefficients.push(coeffs);
+    usedScales.push(a);
   }
 
-  return { scales, coefficients };
+  return { scales: usedScales, coefficients };
 }
 
 /**
@@ -88,8 +91,8 @@ export function computeCWT(
  * local maximum in its scale band — meaning it's larger than its
  * immediate neighbors at the same scale.
  *
- * Uses >= on both sides to avoid plateau right-bias: the first element
- * of a flat plateau is preferred.
+ * Plateau handling: >= left, > right — selects the rightmost element
+ * of a flat plateau region.
  */
 export function detectPeaks(
   cwt: WaveletCoefficients,
@@ -103,16 +106,16 @@ export function detectPeaks(
   for (let si = 0; si < cwt.scales.length; si++) {
     const scale = cwt.scales[si];
     const coeffs = cwt.coefficients[si];
+    const N = coeffs.length;
 
-    for (let pos = 1; pos < coeffs.length - 1; pos++) {
+    for (let pos = 0; pos < N; pos++) {
       const mag = Math.abs(coeffs[pos]);
       if (mag < threshold) continue;
 
-      // Local maximum: >= both neighbors (picks first plateau element)
-      if (
-        mag >= Math.abs(coeffs[pos - 1]) &&
-        mag > Math.abs(coeffs[pos + 1])
-      ) {
+      const leftOk = pos === 0 || mag > Math.abs(coeffs[pos - 1]);
+      const rightOk = pos === N - 1 || mag > Math.abs(coeffs[pos + 1]);
+
+      if (leftOk && rightOk) {
         peaks.push({
           position: pos,
           coefficient: coeffs[pos],

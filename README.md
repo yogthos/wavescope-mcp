@@ -83,10 +83,13 @@ Compressed view of a region using specified scale peaks.
 ## Development
 
 ```bash
-pnpm test          # Run tests
-pnpm test:watch    # Watch mode
-pnpm build         # TypeScript compile
-pnpm dev           # Run with tsx
+pnpm install         # Install dependencies
+pnpm build           # TypeScript compile
+pnpm dev             # Run with tsx
+pnpm test            # Watch mode
+pnpm test:run        # Run tests once
+pnpm test:coverage   # Run with coverage
+pnpm typecheck       # Type check only
 ```
 
 ## Architecture

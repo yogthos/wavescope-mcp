@@ -21,6 +21,7 @@ export interface BandResult {
 
 export interface WaveletContextResult {
   center: number;
+  clamped: boolean;
   bands: {
     fine: BandResult;
     medium: BandResult;
@@ -43,10 +44,11 @@ const BAND_SCALES = {
 export class FileContext {
   readonly filename: string;
   readonly lines: string[];
-  readonly lineCount: number;
   readonly language: LanguageConfig;
   readonly signal: number[];
   readonly coefficients: WaveletCoefficients;
+
+  get lineCount(): number { return this.lines.length; }
 
   // Cached peak set — lazily computed once
   private _allPeaks: Peak[] | null = null;
@@ -54,18 +56,15 @@ export class FileContext {
   constructor(filename: string, content: string) {
     this.filename = filename;
     this.lines = content.split("\n");
-    this.lineCount = this.lines.length;
 
     // Preserve trailing newline: if content ends with \n, ignore the empty last line
     if (content.endsWith("\n") && this.lines[this.lines.length - 1] === "") {
       this.lines.pop();
-      this.lineCount = this.lines.length;
     }
 
     // Handle truly empty content
     if (this.lines.length === 1 && this.lines[0] === "") {
       this.lines = [];
-      this.lineCount = 0;
     }
 
     this.language = detectLanguage(filename);
@@ -76,24 +75,12 @@ export class FileContext {
   // ─── Cached peak access ──────────────────────────────────
 
   /**
-   * Returns all peaks (lazy, cached). Deduplicates same-position
-   * peaks by keeping the one with the largest absolute coefficient.
+   * Returns all peaks (lazy, cached). Multi-scale peaks at the same
+   * position are preserved so that band assembly can filter by scale range.
    */
   private getAllPeaks(): Peak[] {
     if (this._allPeaks) return this._allPeaks;
-
-    const rawPeaks = detectPeaks(this.coefficients, 0.0, 500);
-    // Deduplicate by position: keep the peak with max |coefficient|
-    const bestMap = new Map<number, Peak>();
-    for (const p of rawPeaks) {
-      const existing = bestMap.get(p.position);
-      if (!existing || Math.abs(p.coefficient) > Math.abs(existing.coefficient)) {
-        bestMap.set(p.position, p);
-      }
-    }
-    this._allPeaks = [...bestMap.values()].sort(
-      (a, b) => Math.abs(b.coefficient) - Math.abs(a.coefficient),
-    );
+    this._allPeaks = detectPeaks(this.coefficients, 0.0, 500);
     return this._allPeaks;
   }
 
@@ -107,15 +94,25 @@ export class FileContext {
     minCoefficient: number = 0.3,
     limit: number = 20,
   ): ImportantPosition[] {
-    const peaks = this.getAllPeaks().filter(
-      (p) => Math.abs(p.coefficient) >= minCoefficient,
-    );
-    return peaks.slice(0, limit).map((p: Peak) => ({
-      position: p.position,
-      coefficient: p.coefficient,
-      scale: p.scale,
-      label: this.inferLabel(p.position),
-    }));
+    const allPeaks = this.getAllPeaks();
+    // Deduplicate by position: keep the peak with the largest |coefficient|
+    const bestMap = new Map<number, Peak>();
+    for (const p of allPeaks) {
+      if (Math.abs(p.coefficient) < minCoefficient) continue;
+      const existing = bestMap.get(p.position);
+      if (!existing || Math.abs(p.coefficient) > Math.abs(existing.coefficient)) {
+        bestMap.set(p.position, p);
+      }
+    }
+    return [...bestMap.values()]
+      .sort((a, b) => Math.abs(b.coefficient) - Math.abs(a.coefficient))
+      .slice(0, limit)
+      .map((p: Peak) => ({
+        position: p.position,
+        coefficient: p.coefficient,
+        scale: p.scale,
+        label: this.inferLabel(p.position),
+      }));
   }
 
   /**
@@ -155,6 +152,7 @@ export class FileContext {
 
     return {
       center: cl,
+      clamped: center !== cl,
       bands: {
         fine: {
           range: [fineStart, fineEnd],
@@ -169,7 +167,7 @@ export class FileContext {
           content: this.buildCoarseBand(coarseStart, coarseEnd, nearbyPeaks),
         },
       },
-      waveletPeaks: nearbyPeaks.slice(0, 10).map((p) => ({
+      waveletPeaks: this.dedupPeaks(nearbyPeaks).slice(0, 10).map((p) => ({
         position: p.position,
         coefficient: p.coefficient,
         scale: p.scale,
@@ -186,8 +184,9 @@ export class FileContext {
     end: number,
     scale?: number,
   ): string {
-    const s = Math.max(0, start);
-    const e = Math.min(this.lineCount - 1, end);
+    let s = Math.max(0, start);
+    let e = Math.min(this.lines.length - 1, end);
+    if (s > e) [s, e] = [e, s];
 
     const allPeaks = this.getAllPeaks();
 
@@ -230,8 +229,21 @@ export class FileContext {
 
   // ─── private helpers ──────────────────────────────────────
 
+  private dedupPeaks(peaks: Peak[]): Peak[] {
+    const bestMap = new Map<number, Peak>();
+    for (const p of peaks) {
+      const existing = bestMap.get(p.position);
+      if (!existing || Math.abs(p.coefficient) > Math.abs(existing.coefficient)) {
+        bestMap.set(p.position, p);
+      }
+    }
+    return [...bestMap.values()];
+  }
+
   private findClosestScale(scale: number): number {
-    return this.coefficients.scales.reduce((prev, curr) =>
+    const scales = this.coefficients.scales;
+    if (scales.length === 0) return scale;
+    return scales.reduce((prev, curr) =>
       Math.abs(curr - scale) < Math.abs(prev - scale) ? curr : prev,
     );
   }
@@ -242,52 +254,93 @@ export class FileContext {
     const line = this.lines[pos].trim();
     if (!line) return `line ${pos + 1}`;
 
-    const tokens = line.split(/\s+/);
+    // Tokenize on code delimiters (same regex as signal.ts) so that
+    // forms like "(defn foo" correctly produce token "defn"
+    const tokens = line.split(/[\s()[\]{},;:'".=!<>+\-*/&|^~%@#`]+/).filter(Boolean);
+    // Also keep whitespace-split tokens as fallback for label reading
+    const wsTokens = line.split(/\s+/);
 
     if (this.language.name === "python") {
-      if (tokens[0] === "class") return `class ${tokens[1]?.replace(":", "")}`;
-      if (tokens[0] === "def") return `def ${tokens[1]?.split("(")[0]}`;
-      if (tokens[0] === "import") return `import ${tokens.slice(1).join(" ")}`;
-      if (tokens[0] === "from") return `from ${tokens.slice(1).join(" ")}`;
-      if (tokens[0] === "@") return `decorator ${tokens[0].slice(1)}`;
+      if (wsTokens[0] === "class") return `class ${wsTokens[1]?.replace(":", "")}`;
+      if (wsTokens[0] === "def") return `def ${wsTokens[1]?.split("(")[0]}`;
+      if (wsTokens[0] === "import") return `import ${wsTokens.slice(1).join(" ")}`;
+      if (wsTokens[0] === "from") return `from ${wsTokens.slice(1).join(" ")}`;
+      if (wsTokens[0] === "@") return `decorator ${wsTokens[0].slice(1)}`;
       if (line.startsWith("if __name__")) return "main guard";
     } else {
+      // Use code-delimiter tokens for keyword matching
       if (tokens.includes("class")) {
-        return `class ${tokens[tokens.indexOf("class") + 1]
-          ?.replace("{", "")
-          .replace("implements", "")
-          .trim()}`;
-      }
-      if (tokens.includes("function")) {
-        return `function ${tokens[tokens.indexOf("function") + 1]
-          ?.split("(")[0]}`;
+        const idx = tokens.indexOf("class");
+        return `class ${tokens[idx + 1]?.replace(/\{.*/, "").replace(/extends|implements/g, "").trim()}`;
       }
       if (tokens.includes("interface")) {
-        return `interface ${tokens[tokens.indexOf("interface") + 1]
-          ?.replace("{", "")}`;
+        const idx = tokens.indexOf("interface");
+        return `interface ${tokens[idx + 1]?.replace(/\{.*/, "").trim()}`;
       }
       if (tokens.includes("enum")) {
-        return `enum ${tokens[tokens.indexOf("enum") + 1]
-          ?.replace("{", "")}`;
+        const idx = tokens.indexOf("enum");
+        return `enum ${tokens[idx + 1]?.replace(/\{.*/, "").trim()}`;
       }
-      if (tokens.includes("fn")) {
-        // Rust
+      if (tokens.includes("trait")) {
+        const idx = tokens.indexOf("trait");
+        return `trait ${tokens[idx + 1]?.replace(/\{.*/, "").trim()}`;
+      }
+      if (tokens.includes("struct")) {
+        const idx = tokens.indexOf("struct");
+        return `struct ${tokens[idx + 1]?.replace(/\{.*/, "").trim()}`;
+      }
+      if (tokens.includes("object")) {
+        const idx = tokens.indexOf("object");
+        return `object ${tokens[idx + 1]?.replace(/\{.*/, "").trim()}`;
+      }
+      if (tokens.includes("function")) {
+        const idx = tokens.indexOf("function");
+        return `function ${tokens[idx + 1]?.split("(")[0]}`;
+      }
+      if (tokens.includes("fn") && !tokens.includes("defn")) {
+        // Rust — check defn first to avoid false match on Clojure
         return `fn ${tokens[tokens.indexOf("fn") + 1]?.split("(")[0]}`;
+      }
+      if (tokens.includes("fun")) {
+        // Kotlin
+        return `fun ${tokens[tokens.indexOf("fun") + 1]?.split("(")[0]}`;
       }
       if (tokens.includes("func")) {
         // Go
         return `func ${tokens[tokens.indexOf("func") + 1]?.split("(")[0]}`;
       }
+      if (tokens.includes("def")) {
+        // Scala
+        return `def ${tokens[tokens.indexOf("def") + 1]?.split("(")[0]}`;
+      }
       if (tokens.includes("defn")) {
         // Clojure
         return `defn ${tokens[tokens.indexOf("defn") + 1]}`;
       }
-      if (tokens[0] === "import") return `import ${tokens.slice(1).join(" ")}`;
-      if (tokens[0] === "export") {
-        const rest = tokens.slice(1).join(" ");
+      if (tokens.includes("defmacro")) {
+        return `defmacro ${tokens[tokens.indexOf("defmacro") + 1]}`;
+      }
+      if (tokens.includes("defprotocol")) {
+        return `defprotocol ${tokens[tokens.indexOf("defprotocol") + 1]}`;
+      }
+      if (tokens.includes("defrecord")) {
+        return `defrecord ${tokens[tokens.indexOf("defrecord") + 1]}`;
+      }
+      if (tokens.includes("impl")) {
+        return `impl ${tokens[tokens.indexOf("impl") + 1]?.split("(")[0]}`;
+      }
+      if (tokens.includes("protocol")) {
+        return `protocol ${tokens[tokens.indexOf("protocol") + 1]}`;
+      }
+      if (tokens.includes("extension")) {
+        return `extension ${tokens[tokens.indexOf("extension") + 1]}`;
+      }
+      if (wsTokens[0] === "import") return `import ${wsTokens.slice(1).join(" ")}`;
+      if (wsTokens[0] === "export") {
+        const rest = wsTokens.slice(1).join(" ");
         return `export ${rest.substring(0, 40)}`;
       }
-      if (tokens[0] === "@") return `decorator ${tokens[0].slice(1)}`;
+      if (wsTokens[0] === "@") return `decorator ${wsTokens[0].slice(1)}`;
     }
 
     return line.substring(0, 50);
@@ -325,7 +378,8 @@ export class FileContext {
         (p) =>
           p.position >= start &&
           p.position <= end &&
-          p.scale >= BAND_SCALES.coarse[0],
+          p.scale >= BAND_SCALES.coarse[0] &&
+          p.scale <= BAND_SCALES.coarse[1],
       )
       .sort((a, b) => a.position - b.position);
 
@@ -344,6 +398,7 @@ export class FileContext {
   }
 
   private buildRangeSummary(start: number, end: number): string {
+    if (start > end) return "";
     const previewLines = Math.min(5, end - start + 1);
     const parts: string[] = [];
     const step = Math.ceil((end - start + 1) / previewLines);

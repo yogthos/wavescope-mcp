@@ -7,7 +7,8 @@ import { z } from "zod";
 import { FileContext } from "./context.js";
 import { ProjectIndex } from "./project.js";
 
-const fileCache = new Map<string, FileContext>();
+const fileCache = new Map<string, { ctx: FileContext; ts: number }>();
+const CACHE_TTL = 60_000; // 60 seconds
 
 function norm(path: string): string {
   return resolve(path);
@@ -18,11 +19,11 @@ async function getFileContext(
 ): Promise<FileContext> {
   const key = norm(filePath);
   const cached = fileCache.get(key);
-  if (cached) return cached;
+  if (cached && Date.now() - cached.ts < CACHE_TTL) return cached.ctx;
 
   const content = await readFile(filePath, "utf-8");
   const ctx = new FileContext(filePath, content);
-  fileCache.set(key, ctx);
+  fileCache.set(key, { ctx, ts: Date.now() });
   return ctx;
 }
 
@@ -88,8 +89,8 @@ server.registerTool(
       directory: z.string().optional().describe(
         "Absolute path to a project directory. Conflicts with 'file'.",
       ),
-      min_coefficient: z.number().min(0).max(2).default(0.3).describe(
-        "Minimum wavelet coefficient threshold (0-2). Lower = more results. Default 0.3.",
+      min_coefficient: z.number().min(0).max(10).default(0.3).describe(
+        "Minimum wavelet coefficient threshold (0-10). Lower = more results. Default 0.3.",
       ),
       limit: z.number().int().min(1).max(100).default(20).describe(
         "Maximum number of positions to return. Default 20.",

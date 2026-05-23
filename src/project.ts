@@ -6,6 +6,8 @@ const CODE_EXTENSIONS = new Set([
   ".py",
   ".ts",
   ".tsx",
+  ".mts",
+  ".cts",
   ".js",
   ".jsx",
   ".mjs",
@@ -17,9 +19,12 @@ const CODE_EXTENSIONS = new Set([
   ".php",
   ".swift",
   ".kt",
+  ".kts",
   ".scala",
+  ".sc",
   ".clj",
   ".cljs",
+  ".cljc",
   ".edn",
 ]);
 
@@ -37,6 +42,13 @@ const SKIP_DIRS = new Set([
   ".turbo",
   "coverage",
   ".pytest_cache",
+  ".cache",
+  ".idea",
+  ".vscode",
+  "vendor",
+  "out",
+  "obj",
+  ".gradle",
 ]);
 
 export interface ProjectFile {
@@ -127,6 +139,8 @@ export class ProjectIndex {
 
     for (const file of this.files) {
       const peaks = file.context.getImportantPositions(0.0, 100);
+      if (peaks.length === 0) continue;
+
       const fileRelPath = relative(this.root, file.path);
 
       // Per-file normalization (max = 1.0) combined with file-size weighting
@@ -143,9 +157,9 @@ export class ProjectIndex {
         const rawNormCoeff = maxCoeff > 0
           ? Math.abs(p.coefficient) / maxCoeff
           : 0;
-        const normCoeff = rawNormCoeff * fileWeight * Math.sign(p.coefficient);
+        const normCoeff = rawNormCoeff * fileWeight;
 
-        if (Math.abs(normCoeff) < minCoefficient) continue;
+        if (normCoeff < minCoefficient) continue;
 
         allPeaks.push({
           ...p,
@@ -181,8 +195,6 @@ async function discoverFiles(root: string): Promise<ProjectFile[]> {
     for (const entry of entries) {
       const fullPath = join(dir, entry);
 
-      if (SKIP_DIRS.has(entry)) continue;
-
       let fileStat;
       try {
         fileStat = await stat(fullPath);
@@ -191,12 +203,13 @@ async function discoverFiles(root: string): Promise<ProjectFile[]> {
       }
 
       if (fileStat.isDirectory()) {
+        if (SKIP_DIRS.has(entry)) continue;
         await walk(fullPath);
       } else if (fileStat.isFile()) {
         const ext = extname(entry).toLowerCase();
         if (CODE_EXTENSIONS.has(ext)) {
           try {
-            const content = await readFile(fullPath, "utf-8");
+            const content = await readFile(fullPath, "utf8");
             results.push({
               filename: basename(entry),
               path: fullPath,

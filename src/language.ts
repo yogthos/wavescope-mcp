@@ -12,6 +12,13 @@ export interface LanguageConfig {
   indentWeight: number;
   /** Decorator/annotation weight */
   decoratorWeight: number;
+  /** If true, block comment delimiters must appear at the start of the line */
+  blockCommentAtLineStart?: boolean;
+  /**
+   * If set to ")", block comment end tracking uses paren-depth counting
+   * (for Clojure-style (comment ...) forms with nested S-expressions).
+   */
+  blockCommentUsesParenDepth?: boolean;
 }
 
 // ─── C-like base keywords (shared by TS, Go, Rust, Java, Kotlin, Scala, Swift, etc.) ───
@@ -87,7 +94,7 @@ const pythonConfig: LanguageConfig = {
 
 const tsConfig: LanguageConfig = {
   name: "typescript",
-  extensions: [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"],
+  extensions: [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"],
   structuralKeywords: {
     ...cLikeKeywords,
     get: 0.3,
@@ -210,6 +217,7 @@ const rubyConfig: LanguageConfig = {
   blockCommentEnd: "=end",
   indentWeight: 0.12,
   decoratorWeight: 0.0,
+  blockCommentAtLineStart: true,
 };
 
 const phpConfig: LanguageConfig = {
@@ -365,6 +373,7 @@ const clojureConfig: LanguageConfig = {
   blockCommentEnd: ")",
   indentWeight: 0.12,
   decoratorWeight: 0.0,
+  blockCommentUsesParenDepth: true,
 };
 
 const genericConfig: LanguageConfig = {
@@ -392,6 +401,21 @@ const configs: LanguageConfig[] = [
   clojureConfig,
   genericConfig,
 ];
+
+export {
+  pythonConfig,
+  tsConfig,
+  goConfig,
+  rustConfig,
+  javaConfig,
+  rubyConfig,
+  phpConfig,
+  swiftConfig,
+  kotlinConfig,
+  scalaConfig,
+  clojureConfig,
+  genericConfig,
+};
 
 export function detectLanguage(filename: string): LanguageConfig {
   const ext = filename.slice(filename.lastIndexOf(".")).toLowerCase();

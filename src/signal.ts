@@ -6,6 +6,7 @@ export function computeSignal(
 ): number[] {
   const signal: number[] = new Array(lines.length);
   let inBlockComment = false;
+  let blockCommentDepth = 0;
   let inDocString = false;
   let docStringDelim: string | null = null;
 
@@ -17,18 +18,43 @@ export function computeSignal(
 
     // ── Handle multiline comments / docstrings (continued from previous line) ──
     if (inBlockComment) {
-      const endIdx = stripped.indexOf(lang.blockCommentEnd);
-      if (endIdx !== -1) {
-        inBlockComment = false;
-        // Process code after the closing delimiter, if any
-        const after = stripped.slice(endIdx + lang.blockCommentEnd.length);
-        if (after.trim()) {
-          signal[i] = scoreLine(raw, after.trim(), indent, lang);
+      if (lang.blockCommentUsesParenDepth) {
+        // Track paren depth for Clojure (comment ...) with nested forms
+        let depth = blockCommentDepth;
+        let closeIdx = -1;
+        for (let ci = 0; ci < stripped.length; ci++) {
+          if (stripped[ci] === "(") depth++;
+          else if (stripped[ci] === ")") {
+            depth--;
+            if (depth === 0) { closeIdx = ci; break; }
+          }
+        }
+        if (closeIdx !== -1) {
+          inBlockComment = false;
+          blockCommentDepth = 0;
+          const after = stripped.slice(closeIdx + 1);
+          if (after.trim()) {
+            signal[i] = scoreLine(raw, after.trim(), indent, lang);
+          } else {
+            signal[i] = 0;
+          }
         } else {
+          blockCommentDepth = depth;
           signal[i] = 0;
         }
       } else {
-        signal[i] = 0;
+        const endIdx = stripped.indexOf(lang.blockCommentEnd);
+        if (endIdx !== -1) {
+          inBlockComment = false;
+          const after = stripped.slice(endIdx + lang.blockCommentEnd.length);
+          if (after.trim()) {
+            signal[i] = scoreLine(raw, after.trim(), indent, lang);
+          } else {
+            signal[i] = 0;
+          }
+        } else {
+          signal[i] = 0;
+        }
       }
       continue;
     }
@@ -64,7 +90,7 @@ export function computeSignal(
 
         if (hasClosing) {
           // Single-line docstring: score only code before/after the quotes
-          const real = [before, after.replace(delim, "").trim()]
+          const real = [before, after.replaceAll(delim, "").trim()]
             .filter(Boolean).join("; ");
           signal[i] = real ? scoreLine(raw, real, indent, lang) : 0;
           continue;
@@ -78,7 +104,9 @@ export function computeSignal(
     }
 
     // ── Detect block comment start (anywhere on line, including inline) ──
-    const bcStartIdx = stripped.indexOf(lang.blockCommentStart);
+    const bcStartIdx = lang.blockCommentAtLineStart
+      ? (stripped.startsWith(lang.blockCommentStart) ? 0 : -1)
+      : stripped.indexOf(lang.blockCommentStart);
     if (bcStartIdx !== -1) {
       const before = stripped.slice(0, bcStartIdx).trim();
       const afterDelim = stripped.slice(bcStartIdx + lang.blockCommentStart.length);
@@ -93,6 +121,7 @@ export function computeSignal(
       }
       // Multi-line block comment start
       inBlockComment = true;
+      blockCommentDepth = lang.blockCommentUsesParenDepth ? 1 : 0;
       signal[i] = before ? scoreLine(raw, before, indent, lang) : 0;
       continue;
     }
@@ -123,13 +152,23 @@ function scoreLine(
 ): number {
   let score = 0;
 
+  // Strip inline comment suffix to prevent keywords in comments from leaking into scoring
+  let codeOnly = stripped;
+  for (const prefix of lang.commentPrefixes) {
+    const idx = codeOnly.indexOf(prefix);
+    if (idx !== -1) {
+      codeOnly = codeOnly.slice(0, idx).trim();
+      break;
+    }
+  }
+
   // Indentation depth (proxy for nesting)
   const indentLevel = Math.min(indent / 4, 8);
   score += indentLevel * lang.indentWeight;
 
   // Split on code delimiters so that adjacent punctuation doesn't hide keywords.
   // E.g., "function(" → ["function", ""], "for(" → ["for", ""]
-  const tokens = stripped.split(/[\s()[\]{},;:'".=!<>+\-*/&|^~%@#`]+/);
+  const tokens = codeOnly.split(/[\s()[\]{},;:'".=!<>+\-*/&|^~%@#`]+/);
   for (const token of tokens) {
     if (!token) continue;
     const kwWeight = lang.structuralKeywords[token];
@@ -137,12 +176,12 @@ function scoreLine(
   }
 
   // Decorators / annotations
-  if (lang.name === "python" && stripped.startsWith("@")) {
+  if (lang.name === "python" && codeOnly.startsWith("@")) {
     score += lang.decoratorWeight;
   }
   if (
     (lang.name === "typescript" || lang.name === "java" || lang.name === "kotlin") &&
-    stripped.startsWith("@")
+    codeOnly.startsWith("@")
   ) {
     score += lang.decoratorWeight;
   }
