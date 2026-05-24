@@ -1,6 +1,6 @@
 {
   "name": "wavescope-mcp",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Wavelet-based multi-resolution context management for MCP",
   "type": "module",
   "main": "./dist/index.js",
