@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import { z } from "zod";
 import { FileCache } from "./file-cache.js";
 import {
@@ -13,12 +13,14 @@ import { CursorManager } from "./cursor.js";
 import { FileContext } from "./context.js";
 import { diffFileContext } from "./diff.js";
 import { readFileAtRef, findGitRoot } from "./git.js";
+import { StreamManager } from "./streaming.js";
 
 // ─── Shared file cache ────────────────────────────────────────
 
 const fileCache = new FileCache(60_000, 200);
 const getFileContext = (filePath: string) => fileCache.get(filePath);
 const cursorManager = new CursorManager(60_000, 50);
+const streamManager = new StreamManager(60_000, 20);
 
 // ─── Curated error helpers ───────────────────────────────────
 
@@ -406,6 +408,144 @@ server.registerTool(
     }),
 );
 
+// ─── stream_start ──────────────────────────────────────────
+
+server.registerTool(
+  "stream_start",
+  {
+    description:
+      "Start a streaming operation. Returns a stream_id that can be polled " +
+      "with stream_poll to receive results incrementally. " +
+      "Use this for long-running project-wide queries.",
+    inputSchema: {
+      directory: z.string().describe("Absolute path to the project directory"),
+      min_coefficient: z.number().min(0).max(10).default(0.3).describe(
+        "Minimum wavelet coefficient threshold (0-10). Default 0.3.",
+      ),
+      limit: z.number().int().min(1).max(100).default(20).describe(
+        "Maximum total results across all batches. Default 20.",
+      ),
+      batch_size: z.number().int().min(10).max(500).default(50).describe(
+        "Peaks per batch, 10–500. Default 50.",
+      ),
+    },
+  },
+  ({ directory, min_coefficient, limit, batch_size }) =>
+    track(async () => {
+      try {
+        if (!isAbsolute(directory)) {
+          throw new ToolError("`directory` must be an absolute path");
+        }
+        const root = resolve(directory);
+        const streamId = streamManager.createStream();
+
+        // Background producer — kept inside track() so graceful shutdown
+        // waits for emission to drain, not just for the first setImmediate.
+        track(async () => {
+          try {
+            const project = await ProjectIndex.load(root, fileCache);
+            const allFiles = project.files;
+
+            if (allFiles.length === 0) {
+              streamManager.appendBatch(streamId, [], true);
+              return;
+            }
+
+            // Collect all peaks first, sort globally by |coefficient|,
+            // then slice — matching the non-streaming path semantics.
+            const allPeaks = allFiles.flatMap((f) =>
+              f.context.getImportantPositions(min_coefficient, 500),
+            );
+            allPeaks.sort(
+              (a, b) => Math.abs(b.coefficient) - Math.abs(a.coefficient),
+            );
+            const sliced = allPeaks.slice(0, limit);
+
+            // Emit in chunks, yielding between batches so the consumer
+            // can poll. peek() avoids refreshing the stream's TTL — only
+            // the consumer's poll() should keep the stream alive.
+            for (let offset = 0; offset < sliced.length; offset += batch_size) {
+              if (!streamManager.peek(streamId)) return; // cancelled or evicted
+              const chunk = sliced.slice(offset, offset + batch_size);
+              const isLast = offset + batch_size >= sliced.length;
+              streamManager.appendBatch(streamId, chunk, isLast);
+              if (!isLast) {
+                await new Promise<void>((r) => setImmediate(r));
+              }
+            }
+          } catch (err) {
+            streamManager.markErrored(
+              streamId,
+              (err as Error).message ?? "Unknown error during indexing",
+            );
+          }
+        }).catch(() => {
+          // Defensive: track() should never reject because the inner try/catch
+          // covers the producer, but guard against unhandled rejections from
+          // markErrored itself or future refactors.
+        });
+
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({ stream_id: streamId }),
+          }],
+        };
+      } catch (err) {
+        return toolErrorResponse(curateFsError(err));
+      }
+    }),
+);
+
+// ─── stream_poll ───────────────────────────────────────────
+
+server.registerTool(
+  "stream_poll",
+  {
+    description:
+      "Poll the next batch of results from a streaming operation. " +
+      "Returns an error if the stream ID is unknown. " +
+      "Returns { complete: true } when finished.",
+    inputSchema: {
+      stream_id: z.string().describe("Stream ID from stream_start"),
+    },
+  },
+  ({ stream_id }) =>
+    track(async () => {
+      try {
+        const result = streamManager.poll(stream_id);
+        if (!result) {
+          return toolErrorResponse("Unknown stream ID — stream may have been closed or expired");
+        }
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+        };
+      } catch (err) {
+        return toolErrorResponse(curateFsError(err));
+      }
+    }),
+);
+
+// ─── stream_close ──────────────────────────────────────────
+
+server.registerTool(
+  "stream_close",
+  {
+    description:
+      "Close and clean up a streaming operation.",
+    inputSchema: {
+      stream_id: z.string().describe("Stream ID from stream_start"),
+    },
+  },
+  ({ stream_id }) =>
+    track(async () => {
+      streamManager.close(stream_id);
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ acknowledged: true }) }],
+      };
+    }),
+);
+
 // ─── start ─────────────────────────────────────────────────
 
 async function main() {
@@ -421,9 +561,10 @@ async function main() {
     const fileEvicted = fileCache.evictExpired(now);
     const projectEvicted = evictExpiredProjects(now);
     const cursorEvicted = cursorManager.evictExpired(now);
-    if (fileEvicted > 0 || projectEvicted > 0 || cursorEvicted > 0) {
+    const streamEvicted = streamManager.evictExpired(now);
+    if (fileEvicted > 0 || projectEvicted > 0 || cursorEvicted > 0 || streamEvicted > 0) {
       console.error(
-        `[Cache] Evicted ${fileEvicted} file(s), ${projectEvicted} project(s), ${cursorEvicted} cursor(s)`,
+        `[Cache] Evicted ${fileEvicted} file(s), ${projectEvicted} project(s), ${cursorEvicted} cursor(s), ${streamEvicted} stream(s)`,
       );
     }
   }, CLEANUP_INTERVAL_MS);
@@ -463,6 +604,7 @@ async function main() {
     clearInterval(cleanupTimer);
     clearInterval(memoryTimer);
     cursorManager.shutdown();
+    streamManager.shutdown();
 
     // Wait up to 5s for in-flight handlers to complete
     const deadline = Date.now() + 5000;
@@ -493,3 +635,4 @@ export const __test_clearCache = () => fileCache.clear();
 export const __test_cacheSize = () => fileCache.size;
 export const __test_MAX_CACHE_ENTRIES = fileCache.maxEntries;
 export const __test_cursorManager = cursorManager;
+export const __test_streamManager = streamManager;
