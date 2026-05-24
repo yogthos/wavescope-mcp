@@ -1,6 +1,17 @@
 import { describe, it, expect } from "vitest";
 import { diffPeaks, diffFileContext, FileDiffResult } from "./diff.js";
+import { readFileAtRef, findGitRoot } from "./git.js";
+import { FileContext } from "./context.js";
 import { Peak } from "./wavelet.js";
+import { execFileSync } from "node:child_process";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+  cwd: __dirname,
+  encoding: "utf-8",
+}).trim();
 
 function makePeak(
   position: number,
@@ -180,6 +191,69 @@ describe("diffFileContext", () => {
     expect(result.beforeLineCount).toBe(30);
     expect(result.afterLineCount).toBe(30);
     expect(result.diff.summary.unchanged).toBe(2);
+    expect(result.diff.summary.added).toBe(0);
+    expect(result.diff.summary.removed).toBe(0);
+    expect(result.diff.summary.shifted).toBe(0);
+    expect(result.diff.summary.magnitudeChanged).toBe(0);
+  });
+});
+
+describe("integration: full composition path", () => {
+  it("diffs wavelet peaks between two git revisions of a real file", async () => {
+    // Use src/index.ts which changed between HEAD~1 and HEAD
+    const filePath = resolve(repoRoot, "src/index.ts");
+    const gitRoot = findGitRoot(filePath);
+    expect(gitRoot).toBe(repoRoot);
+
+    const baseContent = await readFileAtRef(repoRoot, filePath, "HEAD~1");
+    const targetContent = await readFileAtRef(repoRoot, filePath, "HEAD");
+
+    const baseCtx = new FileContext(filePath, baseContent);
+    const targetCtx = new FileContext(filePath, targetContent);
+
+    const minCoefficient = 0.3;
+    const limit = 100;
+    const basePeaks = baseCtx.getImportantPositions(minCoefficient, limit)
+      .map((p) => ({ position: p.position, coefficient: p.coefficient, scale: p.scale }));
+    const targetPeaks = targetCtx.getImportantPositions(minCoefficient, limit)
+      .map((p) => ({ position: p.position, coefficient: p.coefficient, scale: p.scale }));
+
+    const result = diffFileContext(
+      basePeaks, targetPeaks,
+      baseCtx.lineCount, targetCtx.lineCount,
+    );
+
+    // Structural assertions
+    expect(result.beforeLineCount).toBeGreaterThan(0);
+    expect(result.afterLineCount).toBeGreaterThan(0);
+    expect(result.diff.changes.length).toBeGreaterThan(0);
+    // All categories together should account for every change
+    const total = result.diff.summary.added + result.diff.summary.removed +
+      result.diff.summary.shifted + result.diff.summary.magnitudeChanged +
+      result.diff.summary.unchanged;
+    expect(total).toBe(result.diff.changes.length);
+
+    // Every change should have a valid kind
+    for (const c of result.diff.changes) {
+      expect(["added", "removed", "shifted", "magnitudeChanged", "unchanged"])
+        .toContain(c.kind);
+      if (c.kind !== "added") expect(c.before).not.toBeNull();
+      if (c.kind !== "removed") expect(c.after).not.toBeNull();
+    }
+  });
+
+  it("returns all-unchanged for identical revisions", async () => {
+    const filePath = resolve(repoRoot, "src/wavelet.ts");
+
+    const content = await readFileAtRef(repoRoot, filePath, "HEAD");
+    const ctx = new FileContext(filePath, content);
+
+    const peaks = ctx.getImportantPositions(0.3, 100)
+      .map((p) => ({ position: p.position, coefficient: p.coefficient, scale: p.scale }));
+
+    const result = diffFileContext(peaks, peaks, ctx.lineCount, ctx.lineCount);
+
+    expect(result.diff.summary.unchanged).toBe(peaks.length);
     expect(result.diff.summary.added).toBe(0);
     expect(result.diff.summary.removed).toBe(0);
     expect(result.diff.summary.shifted).toBe(0);

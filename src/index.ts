@@ -265,23 +265,22 @@ server.registerTool(
         }
 
         // Read target revision (or working tree)
-        let targetContent: string;
+        let targetCtx: FileContext;
         if (targetRef) {
           try {
-            targetContent = await readFileAtRef(repoRoot, absFile, targetRef);
+            const content = await readFileAtRef(repoRoot, absFile, targetRef);
+            targetCtx = new FileContext(absFile, content);
           } catch (err) {
             throw new ToolError(
               `Cannot read file at ref "${targetRef}": ${(err as Error).message}`,
             );
           }
         } else {
-          // Use working tree via FileCache for freshness
-          const ctx = await getFileContext(absFile);
-          targetContent = ctx.lines.join("\n");
+          // Use working tree via FileCache for freshness (avoids re-parsing)
+          targetCtx = await getFileContext(absFile);
         }
 
         const baseCtx = new FileContext(absFile, baseContent);
-        const targetCtx = new FileContext(absFile, targetContent);
 
         const basePeaks = baseCtx.getImportantPositions(
           minCoefficient,

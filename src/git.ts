@@ -15,6 +15,13 @@ export function readFileAtRef(
   filePath: string,
   ref: string,
 ): Promise<string> {
+  // Reject refs that start with '-' to prevent git option injection.
+  if (ref.startsWith("-")) {
+    return Promise.reject(
+      new Error(`Invalid ref "${ref}": refs must not start with '-'`),
+    );
+  }
+
   const normalizedRepo = resolve(repoPath);
   const relPath = isAbsolute(filePath)
     ? relative(normalizedRepo, filePath)
@@ -29,7 +36,12 @@ export function readFileAtRef(
       { cwd: normalizedRepo, maxBuffer: 10 * 1024 * 1024, encoding: "utf-8" },
       (err, stdout) => {
         if (err) {
-          reject(new Error(`git show ${spec}: ${err.message}`));
+          const msg = (err as NodeJS.ErrnoException).code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"
+            ? `File too large (exceeds 10 MB buffer): ${spec}`
+            : `git show ${spec}: ${err.message}`;
+          reject(new Error(msg));
+        } else if (stdout.includes("\x00")) {
+          reject(new Error(`Binary file (NUL byte detected): ${spec}`));
         } else {
           resolvePromise(stdout);
         }
@@ -47,18 +59,21 @@ export function readFileAtRef(
  * @throws If the path is not inside a git repository
  */
 export function findGitRoot(startPath: string): string {
-  const dir = isAbsolute(startPath)
-    ? dirname(resolve(startPath))
-    : resolve(startPath);
+  const p = resolve(startPath);
 
-  try {
-    return execFileSync("git", ["rev-parse", "--show-toplevel"], {
-      cwd: dir,
-      encoding: "utf-8",
-    }).trim();
-  } catch {
-    throw new Error(
-      `Not a git repository (or git not found): could not find git root from ${startPath}`,
-    );
+  // Try from the path itself first (handles directories), then from its parent.
+  for (const dir of [p, dirname(p)]) {
+    try {
+      return execFileSync("git", ["rev-parse", "--show-toplevel"], {
+        cwd: dir,
+        encoding: "utf-8",
+      }).trim();
+    } catch {
+      // Not a git repo at this level, try next
+    }
   }
+
+  throw new Error(
+    `Not a git repository (or git not found): could not find git root from ${startPath}`,
+  );
 }

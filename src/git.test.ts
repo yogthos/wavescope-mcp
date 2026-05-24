@@ -45,6 +45,12 @@ describe("readFileAtRef", () => {
       readFileAtRef(repoRoot, "src/wavelet.ts", "deadbeef"),
     ).rejects.toThrow();
   });
+
+  it("rejects refs starting with '-' before invoking git", async () => {
+    await expect(
+      readFileAtRef(repoRoot, "src/wavelet.ts", "--no-such-flag"),
+    ).rejects.toThrow("must not start with '-'");
+  });
 });
 
 describe("findGitRoot", () => {
@@ -60,5 +66,10 @@ describe("findGitRoot", () => {
 
   it("throws for a non-git directory", () => {
     expect(() => findGitRoot("/tmp")).toThrow();
+  });
+
+  it("finds the repo root when passed the repo root directly", () => {
+    const root = findGitRoot(repoRoot);
+    expect(root).toBe(repoRoot);
   });
 });
