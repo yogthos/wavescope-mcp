@@ -9,8 +9,7 @@
   },
   "files": [
     "dist",
-    "README.md",
-    "LICENSE"
+    "README.md"
   ],
   "scripts": {
     "build": "tsc",
@@ -20,6 +19,7 @@
     "test:run": "vitest run",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
+    "prepare": "pnpm run build",
     "prepublishOnly": "pnpm run build"
   },
   "keywords": [

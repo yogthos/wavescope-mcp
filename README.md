@@ -26,23 +26,46 @@ entire files into context.
 
 ## Installation
 
+### From npm (recommended)
+
 ```bash
-pnpm install
-pnpm build
+npm install -g wavescope-mcp
+# or locally in a project:
+npm install wavescope-mcp
+```
+
+### From source
+
+```bash
+git clone <repo-url>
+cd wavescope-mcp
+pnpm install    # auto-builds dist/ via prepare script
 ```
 
 ## Usage
 
 ### Running as MCP server
 
-Add to your MCP client configuration:
+After global install, just use the binary name:
 
 ```json
 {
   "mcpServers": {
     "wavescope": {
-      "command": "node",
-      "args": ["/path/to/wavescope-mcp/dist/index.js"]
+      "command": "wavescope-mcp"
+    }
+  }
+}
+```
+
+With a local install, use `npx`:
+
+```json
+{
+  "mcpServers": {
+    "wavescope": {
+      "command": "npx",
+      "args": ["wavescope-mcp"]
     }
   }
 }
@@ -91,14 +114,16 @@ Compressed view of a region using specified scale peaks.
 ## Development
 
 ```bash
-pnpm install         # Install dependencies
-pnpm build           # TypeScript compile
-pnpm dev             # Run with tsx
+pnpm install         # Install dependencies + auto-build dist/
+pnpm dev             # Run with tsx (live TypeScript)
 pnpm test            # Watch mode
 pnpm test:run        # Run tests once
 pnpm test:coverage   # Run with coverage
 pnpm typecheck       # Type check only
 ```
+
+`pnpm install` runs the `prepare` script, which builds `dist/` automatically.
+For a manual build, run `pnpm build`.
 
 ## Architecture
 
