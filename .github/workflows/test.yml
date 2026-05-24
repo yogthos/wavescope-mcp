@@ -16,6 +16,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history so tests can resolve HEAD~1 etc.
 
       - uses: pnpm/action-setup@v4
 
