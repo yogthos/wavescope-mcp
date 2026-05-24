@@ -3,7 +3,6 @@ import {
   rickerWavelet,
   computeCWT,
   detectPeaks,
-  WaveletCoefficients,
   Peak,
 } from "./wavelet.js";
 
@@ -43,7 +42,8 @@ describe("computeCWT", () => {
   it("handles empty signal gracefully", () => {
     const result = computeCWT([], [1, 2, 4]);
     expect(result.scales).toEqual([1, 2, 4]);
-    expect(result.coefficients.length).toBe(0);
+    expect(result.coefficients.length).toBe(result.scales.length);
+    expect(result.coefficients.every((c) => c.length === 0)).toBe(true);
   });
 
   it("detects a single spike at the correct position", () => {
@@ -143,5 +143,63 @@ describe("detectPeaks", () => {
       expect(typeof peak.position).toBe("number");
       expect(typeof peak.coefficient).toBe("number");
     }
+  });
+
+  it("collapses cross-scale ridges to a single peak per position", () => {
+    const signal = new Array(200).fill(0);
+    signal[100] = 1.0;
+
+    const result = computeCWT(signal, [1, 2, 4, 8, 16, 32, 64, 128]);
+    const peaks = detectPeaks(result, 0.1);
+
+    const nearSpike = peaks.filter((p) => Math.abs(p.position - 100) <= 2);
+    expect(nearSpike.length).toBe(1);
+  });
+});
+
+describe("computeCWT — kernel correctness at large scales", () => {
+  it("constant signal produces near-zero coefficients at scale 128 on a 4096-sample signal", () => {
+    const signal = new Array(4096).fill(0.5);
+    const result = computeCWT(signal, [128]);
+    const coeffs = result.coefficients[0];
+    const MARGIN = 1024;
+    for (let i = MARGIN; i < coeffs.length - MARGIN; i++) {
+      expect(Math.abs(coeffs[i])).toBeLessThan(0.01);
+    }
+  });
+});
+
+describe("computeCWT — input validation", () => {
+  it("throws on NaN scale", () => {
+    expect(() => computeCWT([1, 2, 3], [NaN])).toThrow();
+  });
+
+  it("throws on Infinity scale", () => {
+    expect(() => computeCWT([1, 2, 3], [Infinity])).toThrow();
+  });
+
+  it("deduplicates repeated scales in input", () => {
+    const signal = new Array(50).fill(0);
+    signal[25] = 1;
+    const result = computeCWT(signal, [1, 1, 2, 2, 4]);
+    expect(result.scales).toEqual([1, 2, 4]);
+    expect(result.coefficients.length).toBe(3);
+  });
+});
+
+describe("computeCWT — boundary handling", () => {
+  it("constant signal at the boundary gives near-zero coefficient under default (reflect)", () => {
+    const signal = new Array(200).fill(0.5);
+    const result = computeCWT(signal, [4, 8, 16]);
+    for (const coeffs of result.coefficients) {
+      expect(Math.abs(coeffs[0])).toBeLessThan(0.05);
+      expect(Math.abs(coeffs[coeffs.length - 1])).toBeLessThan(0.05);
+    }
+  });
+
+  it("opt-in zero boundary still works (back-compat)", () => {
+    const signal = new Array(200).fill(0.5);
+    const result = computeCWT(signal, [16], { boundary: "zero" });
+    expect(result.coefficients[0].length).toBe(200);
   });
 });

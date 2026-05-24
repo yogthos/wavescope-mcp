@@ -185,20 +185,83 @@ describe("FileContext", () => {
 
   describe("get_wavelet_coefficients", () => {
     it("returns coefficients for a specific scale", () => {
-      const coeffs = ctx.getWaveletCoefficients(0, 9, 2);
-      expect(coeffs.length).toBe(10);
-      for (const c of coeffs) {
+      const result = ctx.getWaveletCoefficients(0, 9, 2);
+      expect(result.coefficients.length).toBe(10);
+      expect(result.scale).toBe(2);
+      expect(result.requestedScale).toBe(2);
+      for (const c of result.coefficients) {
         expect(typeof c).toBe("number");
       }
     });
 
     it("clamps to valid range", () => {
-      const coeffs = ctx.getWaveletCoefficients(
+      const result = ctx.getWaveletCoefficients(
         -5,
         ctx.lineCount + 10,
         2,
       );
-      expect(coeffs.length).toBe(ctx.lineCount);
+      expect(result.coefficients.length).toBe(ctx.lineCount);
+    });
+
+    it("surfaces scale substitution when an unavailable scale is requested", () => {
+      const result = ctx.getWaveletCoefficients(0, 9, 3);
+      expect(result.requestedScale).toBe(3);
+      expect(result.scale).not.toBe(3);
+      expect([2, 4]).toContain(result.scale);
+    });
+  });
+
+  describe("get_summary_at_scale — auto-selection", () => {
+    it("picks a small scale for a small region", () => {
+      // Region ~30 lines → fine band (scale 2-ish)
+      const small = ctx.getSummaryAtScale(0, 30);
+      expect(typeof small).toBe("string");
+      expect(small.length).toBeGreaterThan(0);
+    });
+
+    it("picks a coarse scale for a large region", () => {
+      const large = ctx.getSummaryAtScale(0, ctx.lineCount - 1);
+      // Should still produce a summary, not raw full text
+      expect(large.length).toBeGreaterThan(0);
+      expect(large.length).toBeLessThan(samplePython.length);
+    });
+
+    it("auto-selected scale differs by region size", () => {
+      const smallScale = ctx.autoScale(0, 30);
+      const largeScale = ctx.autoScale(0, ctx.lineCount - 1);
+      expect(largeScale).toBeGreaterThan(smallScale);
+    });
+  });
+
+  describe("buildSectionSummary — first peak at rangeStart regression", () => {
+    it("does not emit an inverted range when the first peak lies on rangeStart", () => {
+      // Force a coarse-band query that includes peak at position 0.
+      const result = ctx.queryWaveletContext(0, ctx.lineCount);
+      const coarse = result.bands.coarse.content;
+      // No "[X-Y] ..." with X > Y
+      for (const line of coarse.split("\n")) {
+        const m = line.match(/^\[(\d+)-(\d+)\]/);
+        if (m) {
+          const x = Number(m[1]);
+          const y = Number(m[2]);
+          expect(x).toBeLessThanOrEqual(y);
+        }
+      }
+    });
+  });
+
+  describe("queryWaveletContext — clamping disclosure", () => {
+    it("returns clamped=true and clampedFrom when center is beyond file", () => {
+      const result = ctx.queryWaveletContext(ctx.lineCount + 100, 200);
+      expect(result.clamped).toBe(true);
+      expect(result.clampedFrom).toBe(ctx.lineCount + 100);
+      expect(result.center).toBe(ctx.lineCount - 1);
+    });
+
+    it("returns clamped=false and no clampedFrom when center is valid", () => {
+      const result = ctx.queryWaveletContext(10, 200);
+      expect(result.clamped).toBe(false);
+      expect(result.clampedFrom).toBeUndefined();
     });
   });
 });

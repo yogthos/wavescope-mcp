@@ -8,16 +8,15 @@ export function rickerWavelet(t: number): number {
 
 /**
  * Generate wavelet kernel values for scale a, centered at 0.
- * Truncated to ±4a (but capped at the signal length to avoid
- * oversized kernels for large scales on small signals).
- * Includes 1/√a normalization to keep coefficient magnitudes
- * comparable across scales.
+ * Truncated to ±5a (covers ~99.99% of the Ricker energy) but bounded
+ * by half the signal length to keep the kernel finite on short inputs.
+ * Includes 1/√a normalization to keep coefficient magnitudes comparable
+ * across scales.
  */
 function makeKernel(a: number, numPoints: number): number[] {
-  if (a <= 0) throw new Error(`Invalid scale: ${a}`);
-  // Cap kernel half-width: 4*a but no more than half the signal
-  const halfWidth = Math.ceil(4 * a);
-  const half = Math.min(halfWidth, Math.ceil(numPoints / 2), 256);
+  if (!Number.isFinite(a) || a <= 0) throw new Error(`Invalid scale: ${a}`);
+  const halfWidth = Math.ceil(5 * a);
+  const half = Math.min(halfWidth, Math.ceil(numPoints / 2));
   const invSqrtA = 1 / Math.sqrt(a);
   const kernel: number[] = [];
   for (let t = -half; t <= half; t++) {
@@ -37,7 +36,26 @@ export interface Peak {
   scale: number;
 }
 
+export type Boundary = "reflect" | "zero";
+
+export interface CWTOptions {
+  boundary?: Boundary;
+}
+
 const DEFAULT_SCALES = [1, 2, 4, 8, 16, 32, 64, 128];
+
+/**
+ * Reflect-index: mirror out-of-range indices back into [0, N-1].
+ * Used to suppress boundary artifacts where the wavelet's negative
+ * lobes would otherwise be clipped by zero-padding.
+ */
+function reflectIndex(idx: number, N: number): number {
+  if (N === 1) return 0;
+  const period = 2 * (N - 1);
+  let i = idx % period;
+  if (i < 0) i += period;
+  return i >= N ? period - i : i;
+}
 
 /**
  * Compute the Continuous Wavelet Transform (Ricker) over the signal.
@@ -46,25 +64,30 @@ const DEFAULT_SCALES = [1, 2, 4, 8, 16, 32, 64, 128];
  * with the signal. The result for scale a at position b is:
  *   W(a, b) = Σ_t ψ_a(t-b) · signal[t]
  *
- * Boundary handling: signal is zero-padded outside its domain.
+ * Boundary handling defaults to symmetric reflection; pass
+ * `{ boundary: "zero" }` for the older zero-pad behavior.
  */
 export function computeCWT(
   signal: number[],
   scales: number[] = DEFAULT_SCALES,
+  options: CWTOptions = {},
 ): WaveletCoefficients {
+  const boundary = options.boundary ?? "reflect";
   const N = signal.length;
-  const coefficients: number[][] = [];
   const usedScales: number[] = [];
+  for (const a of scales) {
+    if (!usedScales.includes(a)) usedScales.push(a);
+  }
+  const coefficients: number[][] = [];
 
-  // Early return for empty signal
   if (N === 0) {
-    return { scales: [...scales], coefficients };
+    return { scales: usedScales, coefficients: usedScales.map(() => []) };
   }
 
-  for (const a of scales) {
+  for (const a of usedScales) {
     const kernel = makeKernel(a, N);
     const halfKernel = Math.floor(kernel.length / 2);
-    const coeffs: number[] = new Array(N);
+    const coeffs = new Array<number>(N);
 
     for (let pos = 0; pos < N; pos++) {
       let sum = 0;
@@ -72,13 +95,14 @@ export function computeCWT(
         const signalIdx = pos + k - halfKernel;
         if (signalIdx >= 0 && signalIdx < N) {
           sum += kernel[k] * signal[signalIdx];
+        } else if (boundary === "reflect") {
+          sum += kernel[k] * signal[reflectIndex(signalIdx, N)];
         }
       }
       coeffs[pos] = sum;
     }
 
     coefficients.push(coeffs);
-    usedScales.push(a);
   }
 
   return { scales: usedScales, coefficients };
@@ -93,11 +117,18 @@ export function computeCWT(
  *
  * Plateau handling: >= left, > right — selects the rightmost element
  * of a flat plateau region.
+ *
+ * Cross-scale ridge collapse: a single structural feature produces local
+ * maxima at the same position across multiple scales. After magnitude
+ * sorting, peaks whose position is within `ridgeWindow` of an already-kept
+ * stronger peak are dropped, so a single spike yields one peak (the
+ * dominant scale) rather than one per scale.
  */
 export function detectPeaks(
   cwt: WaveletCoefficients,
   threshold: number,
-  maxPeaks: number = 100,
+  maxPeaks: number = 250,
+  ridgeWindow: number = 2,
 ): Peak[] {
   if (cwt.coefficients.length === 0) return [];
 
@@ -112,7 +143,7 @@ export function detectPeaks(
       const mag = Math.abs(coeffs[pos]);
       if (mag < threshold) continue;
 
-      const leftOk = pos === 0 || mag > Math.abs(coeffs[pos - 1]);
+      const leftOk = pos === 0 || mag >= Math.abs(coeffs[pos - 1]);
       const rightOk = pos === N - 1 || mag > Math.abs(coeffs[pos + 1]);
 
       if (leftOk && rightOk) {
@@ -125,8 +156,20 @@ export function detectPeaks(
     }
   }
 
-  // Sort by absolute coefficient magnitude descending
   peaks.sort((a, b) => Math.abs(b.coefficient) - Math.abs(a.coefficient));
 
-  return peaks.slice(0, maxPeaks);
+  const kept: Peak[] = [];
+  for (const peak of peaks) {
+    let overlap = false;
+    for (const k of kept) {
+      if (Math.abs(k.position - peak.position) <= ridgeWindow) {
+        overlap = true;
+        break;
+      }
+    }
+    if (!overlap) kept.push(peak);
+    if (kept.length >= maxPeaks) break;
+  }
+
+  return kept;
 }

@@ -1,6 +1,8 @@
 export interface LanguageConfig {
   name: string;
   extensions: string[];
+  /** Filenames (no extension) that should also map here, e.g. "Rakefile" */
+  filenames?: string[];
   /** Keywords that signal a structural boundary and their weight */
   structuralKeywords: Record<string, number>;
   /** Lines that are pure comments get zero signal */
@@ -15,21 +17,16 @@ export interface LanguageConfig {
   /** If true, block comment delimiters must appear at the start of the line */
   blockCommentAtLineStart?: boolean;
   /**
-   * If set to ")", block comment end tracking uses paren-depth counting
+   * If true, block comment end tracking uses paren-depth counting
    * (for Clojure-style (comment ...) forms with nested S-expressions).
    */
   blockCommentUsesParenDepth?: boolean;
 }
 
-// ─── C-like base keywords (shared by TS, Go, Rust, Java, Kotlin, Scala, Swift, etc.) ───
+// ─── Base keyword sets ───────────────────────────────────────
 
 const cLikeKeywords: Record<string, number> = {
   class: 1.0,
-  function: 0.9,
-  fn: 0.9,
-  func: 0.9,
-  defun: 0.9,
-  defn: 0.9,
   export: 0.6,
   import: 0.6,
   public: 0.3,
@@ -54,6 +51,15 @@ const cLikeKeywords: Record<string, number> = {
   finally: 0.2,
   return: 0.2,
   throw: 0.2,
+};
+
+const jsLikeKeywords: Record<string, number> = {
+  ...cLikeKeywords,
+  function: 0.9,
+};
+
+const tsLikeKeywords: Record<string, number> = {
+  ...jsLikeKeywords,
   interface: 0.9,
   type: 0.5,
   enum: 0.8,
@@ -63,11 +69,10 @@ const cLikeKeywords: Record<string, number> = {
 
 const pythonConfig: LanguageConfig = {
   name: "python",
-  extensions: [".py"],
+  extensions: [".py", ".pyi", ".pyx"],
   structuralKeywords: {
     class: 1.0,
     def: 0.9,
-    async: 0.3,
     import: 0.6,
     from: 0.5,
     return: 0.2,
@@ -81,11 +86,12 @@ const pythonConfig: LanguageConfig = {
     finally: 0.2,
     for: 0.3,
     while: 0.3,
-    with: 0.3,
+    with: 0.4,
     match: 0.3,
     case: 0.2,
   },
   commentPrefixes: ["#"],
+  // Python docstrings ("""..."""/'''...''') are handled specially in signal.ts
   blockCommentStart: '"""',
   blockCommentEnd: '"""',
   indentWeight: 0.15,
@@ -94,9 +100,24 @@ const pythonConfig: LanguageConfig = {
 
 const tsConfig: LanguageConfig = {
   name: "typescript",
-  extensions: [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"],
+  extensions: [".ts", ".tsx", ".mts", ".cts"],
   structuralKeywords: {
-    ...cLikeKeywords,
+    ...tsLikeKeywords,
+    get: 0.3,
+    set: 0.3,
+  },
+  commentPrefixes: ["//"],
+  blockCommentStart: "/*",
+  blockCommentEnd: "*/",
+  indentWeight: 0.15,
+  decoratorWeight: 0.5,
+};
+
+const jsConfig: LanguageConfig = {
+  name: "javascript",
+  extensions: [".js", ".jsx", ".mjs", ".cjs"],
+  structuralKeywords: {
+    ...jsLikeKeywords,
     get: 0.3,
     set: 0.3,
   },
@@ -117,8 +138,7 @@ const goConfig: LanguageConfig = {
     defer: 0.2,
     select: 0.2,
     struct: 0.9,
-    package: 0.6,
-    function: undefined as unknown as number, // remove inherited key
+    package: 0.3,
   },
   commentPrefixes: ["//"],
   blockCommentStart: "/*",
@@ -126,8 +146,6 @@ const goConfig: LanguageConfig = {
   indentWeight: 0.1,
   decoratorWeight: 0.0,
 };
-// Remove the inherited 'function' key from Go
-delete goConfig.structuralKeywords.function;
 
 const rustConfig: LanguageConfig = {
   name: "rust",
@@ -142,12 +160,13 @@ const rustConfig: LanguageConfig = {
     mut: 0.1,
     trait: 0.9,
     struct: 0.9,
+    enum: 0.8,
+    type: 0.5,
     match: 0.3,
     where: 0.2,
     unsafe: 0.3,
     extern: 0.3,
     macro_rules: 0.7,
-    function: undefined as unknown as number,
   },
   commentPrefixes: ["//"],
   blockCommentStart: "/*",
@@ -155,13 +174,12 @@ const rustConfig: LanguageConfig = {
   indentWeight: 0.15,
   decoratorWeight: 0.4,
 };
-delete rustConfig.structuralKeywords.function;
 
 const javaConfig: LanguageConfig = {
   name: "java",
   extensions: [".java"],
   structuralKeywords: {
-    ...cLikeKeywords,
+    ...tsLikeKeywords,
     package: 0.6,
     extends: 0.5,
     implements: 0.5,
@@ -181,7 +199,8 @@ const javaConfig: LanguageConfig = {
 
 const rubyConfig: LanguageConfig = {
   name: "ruby",
-  extensions: [".rb"],
+  extensions: [".rb", ".rake", ".gemspec"],
+  filenames: ["Rakefile", "Gemfile"],
   structuralKeywords: {
     class: 1.0,
     def: 0.9,
@@ -224,7 +243,7 @@ const phpConfig: LanguageConfig = {
   name: "php",
   extensions: [".php"],
   structuralKeywords: {
-    ...cLikeKeywords,
+    ...tsLikeKeywords,
     namespace: 0.6,
     use: 0.5,
     trait: 0.8,
@@ -249,8 +268,6 @@ const swiftConfig: LanguageConfig = {
   structuralKeywords: {
     ...cLikeKeywords,
     func: 0.9,
-    var: 0.2,
-    let: 0.2,
     guard: 0.3,
     defer: 0.2,
     protocol: 0.9,
@@ -268,7 +285,6 @@ const swiftConfig: LanguageConfig = {
     rethrows: 0.2,
     associatedtype: 0.5,
     typealias: 0.4,
-    function: undefined as unknown as number,
   },
   commentPrefixes: ["//"],
   blockCommentStart: "/*",
@@ -276,7 +292,6 @@ const swiftConfig: LanguageConfig = {
   indentWeight: 0.15,
   decoratorWeight: 0.4,
 };
-delete swiftConfig.structuralKeywords.function;
 
 const kotlinConfig: LanguageConfig = {
   name: "kotlin",
@@ -285,7 +300,6 @@ const kotlinConfig: LanguageConfig = {
     ...cLikeKeywords,
     fun: 0.9,
     val: 0.2,
-    var: 0.2,
     object: 0.7,
     companion: 0.4,
     data: 0.4,
@@ -301,7 +315,6 @@ const kotlinConfig: LanguageConfig = {
     annotation: 0.4,
     expect: 0.3,
     actual: 0.3,
-    function: undefined as unknown as number,
   },
   commentPrefixes: ["//"],
   blockCommentStart: "/*",
@@ -309,7 +322,6 @@ const kotlinConfig: LanguageConfig = {
   indentWeight: 0.15,
   decoratorWeight: 0.5,
 };
-delete kotlinConfig.structuralKeywords.function;
 
 const scalaConfig: LanguageConfig = {
   name: "scala",
@@ -318,7 +330,6 @@ const scalaConfig: LanguageConfig = {
     ...cLikeKeywords,
     def: 0.9,
     val: 0.2,
-    var: 0.2,
     object: 0.7,
     trait: 0.9,
     sealed: 0.5,
@@ -331,7 +342,6 @@ const scalaConfig: LanguageConfig = {
     match: 0.3,
     lazy: 0.1,
     override: 0.3,
-    function: undefined as unknown as number,
   },
   commentPrefixes: ["//"],
   blockCommentStart: "/*",
@@ -339,20 +349,26 @@ const scalaConfig: LanguageConfig = {
   indentWeight: 0.15,
   decoratorWeight: 0.5,
 };
-delete scalaConfig.structuralKeywords.function;
 
 const clojureConfig: LanguageConfig = {
   name: "clojure",
   extensions: [".clj", ".cljs", ".cljc", ".edn"],
   structuralKeywords: {
     defn: 0.9,
+    "defn-": 0.9,
     def: 0.7,
     defmacro: 0.9,
+    defmulti: 0.9,
     defmethod: 0.8,
     defprotocol: 0.9,
     defrecord: 0.9,
     deftype: 0.9,
     definterface: 0.9,
+    defonce: 0.7,
+    "extend-type": 0.8,
+    "extend-protocol": 0.8,
+    letfn: 0.6,
+    reify: 0.6,
     ns: 0.6,
     require: 0.6,
     use: 0.5,
@@ -380,16 +396,19 @@ const genericConfig: LanguageConfig = {
   name: "generic",
   extensions: [],
   structuralKeywords: {},
-  commentPrefixes: ["#", "//", ";"],
+  commentPrefixes: ["#"],
   blockCommentStart: "/*",
   blockCommentEnd: "*/",
   indentWeight: 0.1,
   decoratorWeight: 0.3,
 };
 
+// Ordered by priority — genericConfig (last) is the fallback.
+// It must remain last and must not share extensions with preceding configs.
 const configs: LanguageConfig[] = [
   pythonConfig,
   tsConfig,
+  jsConfig,
   goConfig,
   rustConfig,
   javaConfig,
@@ -403,8 +422,10 @@ const configs: LanguageConfig[] = [
 ];
 
 export {
+  configs,
   pythonConfig,
   tsConfig,
+  jsConfig,
   goConfig,
   rustConfig,
   javaConfig,
@@ -418,9 +439,17 @@ export {
 };
 
 export function detectLanguage(filename: string): LanguageConfig {
-  const ext = filename.slice(filename.lastIndexOf(".")).toLowerCase();
+  const slash = Math.max(filename.lastIndexOf("/"), filename.lastIndexOf("\\"));
+  const basename = slash >= 0 ? filename.slice(slash + 1) : filename;
   for (const cfg of configs) {
-    if (cfg.extensions.includes(ext)) return cfg;
+    if (cfg.filenames?.includes(basename)) return cfg;
+  }
+  const dot = basename.lastIndexOf(".");
+  const ext = dot >= 0 ? basename.slice(dot).toLowerCase() : "";
+  if (ext) {
+    for (const cfg of configs) {
+      if (cfg.extensions.includes(ext)) return cfg;
+    }
   }
   return genericConfig;
 }

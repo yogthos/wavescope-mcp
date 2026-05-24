@@ -207,4 +207,155 @@ describe("computeSignal", () => {
       }
     });
   });
+
+  describe("string-literal awareness", () => {
+    it("does not enter block-comment state from /* inside a TS string", () => {
+      const lines = [
+        'const s = "/* not a real comment */";',
+        "const x = 1;",
+      ];
+      const signal = computeSignal(lines, tsLang);
+      expect(signal[1]).toBeGreaterThan(0);
+    });
+
+    it("does not strip code at // inside a URL string", () => {
+      const lines = [
+        'export const url = "https://example.com";',
+      ];
+      const signal = computeSignal(lines, tsLang);
+      expect(signal[0]).toBeGreaterThan(0.5);
+    });
+
+    it("does not enter block-comment state from /* inside a template literal", () => {
+      const lines = [
+        "const t = `/* nope */`;",
+        "function next() {}",
+      ];
+      const signal = computeSignal(lines, tsLang);
+      expect(signal[1]).toBeGreaterThan(0.5);
+    });
+  });
+
+  describe("tab indentation", () => {
+    it("expands tabs as 4 spaces for indent scoring (Go)", () => {
+      const tabLines = ["\t\tfmt.Println(\"x\")"];
+      const spaceLines = ["        fmt.Println(\"x\")"];
+      const tabSignal = computeSignal(tabLines, goLang);
+      const spaceSignal = computeSignal(spaceLines, goLang);
+      expect(tabSignal[0]).toBeCloseTo(spaceSignal[0], 5);
+    });
+  });
+
+  describe("member-access keyword leak", () => {
+    it("does not score 'class' when used as Python attribute access", () => {
+      const lines = ["x = obj.class"];
+      const signal = computeSignal(lines, pyLang);
+      expect(signal[0]).toBe(0);
+    });
+
+    it("does not score 'def' when used as TS member access", () => {
+      const lines = ["return obj.def;"];
+      const signal = computeSignal(lines, tsLang);
+      expect(signal[0]).toBeLessThan(0.3);
+    });
+  });
+
+  describe("Python async def", () => {
+    it("async def does not exceed class-line signal", () => {
+      const classLine = ["class Foo:"];
+      const asyncDef = ["async def foo():"];
+      const classSig = computeSignal(classLine, pyLang)[0];
+      const asyncSig = computeSignal(asyncDef, pyLang)[0];
+      expect(asyncSig).toBeLessThanOrEqual(classSig);
+    });
+  });
+
+  describe("PHP 8 attributes", () => {
+    it("does not score #[Route(...)] as a comment", () => {
+      const phpLang = detectLanguage("test.php");
+      const lines = ["#[Route('/x')]", "function handler() {}"];
+      const signal = computeSignal(lines, phpLang);
+      expect(signal[0]).toBeGreaterThan(0);
+    });
+
+    it("still treats plain # as a comment in PHP", () => {
+      const phpLang = detectLanguage("test.php");
+      const lines = ["# real comment"];
+      const signal = computeSignal(lines, phpLang);
+      expect(signal[0]).toBe(0);
+    });
+  });
+
+  describe("JavaScript as a distinct language", () => {
+    it("detectLanguage returns 'javascript' for .js files", () => {
+      expect(detectLanguage("foo.js").name).toBe("javascript");
+      expect(detectLanguage("foo.jsx").name).toBe("javascript");
+      expect(detectLanguage("foo.mjs").name).toBe("javascript");
+      expect(detectLanguage("foo.cjs").name).toBe("javascript");
+    });
+
+    it("detectLanguage returns 'typescript' for .ts files", () => {
+      expect(detectLanguage("foo.ts").name).toBe("typescript");
+      expect(detectLanguage("foo.tsx").name).toBe("typescript");
+    });
+
+    it("JS config does not have TS-only keywords like interface/type/enum", () => {
+      const jsLang = detectLanguage("foo.js");
+      expect(jsLang.structuralKeywords.interface).toBeUndefined();
+      expect(jsLang.structuralKeywords.enum).toBeUndefined();
+    });
+  });
+
+  describe("generic config", () => {
+    it("does not claim .edn extension", () => {
+      const lang = detectLanguage("foo.edn");
+      expect(lang.name).not.toBe("generic");
+    });
+
+    it("does not treat ';' as comment prefix (PHP-style fall-through)", () => {
+      const lang = detectLanguage("foo.unknownext");
+      expect(lang.commentPrefixes).not.toContain(";");
+      expect(lang.commentPrefixes).not.toContain("//");
+    });
+  });
+
+  describe("Clojure structural forms", () => {
+    it("recognizes defmulti, defonce, letfn, reify, extend-type, extend-protocol", () => {
+      const cljLang = detectLanguage("test.clj");
+      const lines = [
+        "(defmulti area :shape)",
+        "(defonce server (start))",
+        "(letfn [(helper [x] x)] ...)",
+        "(reify Foo (bar [_] 1))",
+        "(extend-type String Foo (bar [_] 1))",
+        "(extend-protocol Foo String (bar [_] 1))",
+      ];
+      const signal = computeSignal(lines, cljLang);
+      for (const s of signal) {
+        expect(s).toBeGreaterThan(0.3);
+      }
+    });
+  });
+
+  describe("Java inline annotations", () => {
+    it("scores public @Nullable String foo() as a decorator-bearing line", () => {
+      const javaLang = detectLanguage("test.java");
+      const withAnnotation = ["public @Nullable String foo() {}"];
+      const withoutAnnotation = ["public String foo() {}"];
+      const a = computeSignal(withAnnotation, javaLang)[0];
+      const b = computeSignal(withoutAnnotation, javaLang)[0];
+      expect(a).toBeGreaterThan(b);
+    });
+  });
+
+  describe("extension detection", () => {
+    it("recognizes .pyi as Python", () => {
+      expect(detectLanguage("stubs.pyi").name).toBe("python");
+    });
+
+    it("recognizes Rakefile and Gemfile as Ruby", () => {
+      expect(detectLanguage("Rakefile").name).toBe("ruby");
+      expect(detectLanguage("Gemfile").name).toBe("ruby");
+    });
+  });
 });

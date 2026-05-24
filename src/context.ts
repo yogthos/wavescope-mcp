@@ -12,6 +12,7 @@ export interface ImportantPosition {
   coefficient: number;
   scale: number;
   label: string;
+  filename?: string;
 }
 
 export interface BandResult {
@@ -22,12 +23,23 @@ export interface BandResult {
 export interface WaveletContextResult {
   center: number;
   clamped: boolean;
+  /** Original `center` requested by caller, present only when clamped. */
+  clampedFrom?: number;
   bands: {
     fine: BandResult;
     medium: BandResult;
     coarse: BandResult;
   };
   waveletPeaks: ImportantPosition[];
+}
+
+export interface WaveletCoefficientsResult {
+  /** The actual scale used (may differ from `requestedScale`). */
+  scale: number;
+  /** The scale originally requested by the caller. */
+  requestedScale: number;
+  /** Raw coefficient slice. */
+  coefficients: number[];
 }
 
 /** Band scale ranges used by buildMediumBand / buildCoarseBand. */
@@ -80,7 +92,7 @@ export class FileContext {
    */
   private getAllPeaks(): Peak[] {
     if (this._allPeaks) return this._allPeaks;
-    this._allPeaks = detectPeaks(this.coefficients, 0.0, 500);
+    this._allPeaks = detectPeaks(this.coefficients, 0.0, 1000);
     return this._allPeaks;
   }
 
@@ -127,7 +139,22 @@ export class FileContext {
     center: number,
     radius: number,
   ): WaveletContextResult {
+    if (this.lineCount === 0) {
+      const empty: WaveletContextResult = {
+        center: 0,
+        clamped: center !== 0,
+        bands: {
+          fine: { range: [0, 0], content: "" },
+          medium: { range: [0, 0], content: "" },
+          coarse: { range: [0, 0], content: "" },
+        },
+        waveletPeaks: [],
+      };
+      if (empty.clamped) empty.clampedFrom = center;
+      return empty;
+    }
     const cl = Math.max(0, Math.min(center, this.lineCount - 1));
+    const clamped = center !== cl;
     const total = this.lineCount;
 
     // Fine band: ±radius/5, minimum 10 lines
@@ -150,9 +177,9 @@ export class FileContext {
       (p) => p.position >= coarseStart && p.position <= coarseEnd,
     );
 
-    return {
+    const result: WaveletContextResult = {
       center: cl,
-      clamped: center !== cl,
+      clamped,
       bands: {
         fine: {
           range: [fineStart, fineEnd],
@@ -174,6 +201,29 @@ export class FileContext {
         label: this.inferLabel(p.position),
       })),
     };
+    if (clamped) result.clampedFrom = center;
+    return result;
+  }
+
+  /**
+   * Pick a representative scale for a region of the given size, matched
+   * to the wavelength most useful for summarizing structure at that
+   * resolution. Snaps to the closest available scale.
+   *
+   * Heuristic (region size in lines → target scale):
+   *   ≤ 50    → 2
+   *   ≤ 200   → 8
+   *   ≤ 800   → 32
+   *   > 800   → 128
+   */
+  autoScale(start: number, end: number): number {
+    const size = Math.max(1, end - start + 1);
+    let target: number;
+    if (size <= 50) target = 2;
+    else if (size <= 200) target = 8;
+    else if (size <= 800) target = 32;
+    else target = 128;
+    return this.findClosestScale(target);
   }
 
   /**
@@ -184,22 +234,23 @@ export class FileContext {
     end: number,
     scale?: number,
   ): string {
+    if (this.lines.length === 0) return "";
     let s = Math.max(0, start);
     let e = Math.min(this.lines.length - 1, end);
     if (s > e) [s, e] = [e, s];
 
     const allPeaks = this.getAllPeaks();
 
-    // Filter peaks in range, optionally matching closest scale
+    // Auto-select a representative scale when caller doesn't pin one.
     const resolvedScale = scale !== undefined
       ? this.findClosestScale(scale)
-      : undefined;
+      : this.autoScale(s, e);
 
     const peaksInRange = allPeaks.filter(
       (p) =>
         p.position >= s &&
         p.position <= e &&
-        (resolvedScale === undefined || p.scale === resolvedScale),
+        p.scale === resolvedScale,
     );
 
     if (peaksInRange.length === 0) {
@@ -213,18 +264,27 @@ export class FileContext {
     start: number,
     end: number,
     scale: number,
-  ): number[] {
+  ): WaveletCoefficientsResult {
+    if (this.coefficients.coefficients.length === 0) {
+      return { scale, requestedScale: scale, coefficients: [] };
+    }
     const resolvedScale = this.findClosestScale(scale);
     const scaleIdx = this.coefficients.scales.indexOf(resolvedScale);
 
     const coeffs = this.coefficients.coefficients[scaleIdx];
+    if (!coeffs) {
+      return { scale: resolvedScale, requestedScale: scale, coefficients: [] };
+    }
     let s = Math.max(0, start);
     let e = Math.min(coeffs.length - 1, end);
 
-    // Guard inverted range
     if (s > e) [s, e] = [e, s];
 
-    return coeffs.slice(s, e + 1);
+    return {
+      scale: resolvedScale,
+      requestedScale: scale,
+      coefficients: coeffs.slice(s, e + 1),
+    };
   }
 
   // ─── private helpers ──────────────────────────────────────
@@ -240,6 +300,11 @@ export class FileContext {
     return [...bestMap.values()];
   }
 
+  /**
+   * Snap `scale` to the nearest scale present in the wavelet index.
+   * Ties (e.g. 3 → equidistant from 2 and 4) resolve to the lower scale
+   * (insertion-order stable on Array.reduce).
+   */
   private findClosestScale(scale: number): number {
     const scales = this.coefficients.scales;
     if (scales.length === 0) return scale;
@@ -252,7 +317,7 @@ export class FileContext {
     if (pos < 0 || pos >= this.lines.length) return "unknown";
 
     const line = this.lines[pos].trim();
-    if (!line) return `line ${pos + 1}`;
+    if (!line) return `line ${pos}`;
 
     // Tokenize on code delimiters (same regex as signal.ts) so that
     // forms like "(defn foo" correctly produce token "defn"
@@ -265,9 +330,20 @@ export class FileContext {
       if (wsTokens[0] === "def") return `def ${wsTokens[1]?.split("(")[0]}`;
       if (wsTokens[0] === "import") return `import ${wsTokens.slice(1).join(" ")}`;
       if (wsTokens[0] === "from") return `from ${wsTokens.slice(1).join(" ")}`;
-      if (wsTokens[0] === "@") return `decorator ${wsTokens[0].slice(1)}`;
+      if (line.startsWith("@")) return `decorator ${line.split(/[\s()]+/)[0].slice(1)}`;
       if (line.startsWith("if __name__")) return "main guard";
     } else {
+      // Decorator detection (before keyword checks so "export @foo class" works)
+      if (line.startsWith("@")) {
+        const decorator = line.split(/[\s()]+/)[0];
+        return `decorator ${decorator.slice(1)}`;
+      }
+      // Import/export at top (before keyword checks to capture "export class Foo")
+      if (wsTokens[0] === "import") return `import ${wsTokens.slice(1).join(" ")}`;
+      if (wsTokens[0] === "export") {
+        const rest = wsTokens.slice(1).join(" ");
+        return `export ${rest.substring(0, 40)}`;
+      }
       // Use code-delimiter tokens for keyword matching
       if (tokens.includes("class")) {
         const idx = tokens.indexOf("class");
@@ -326,6 +402,9 @@ export class FileContext {
       if (tokens.includes("defrecord")) {
         return `defrecord ${tokens[tokens.indexOf("defrecord") + 1]}`;
       }
+      if (tokens.includes("deftype")) {
+        return `deftype ${tokens[tokens.indexOf("deftype") + 1]}`;
+      }
       if (tokens.includes("impl")) {
         return `impl ${tokens[tokens.indexOf("impl") + 1]?.split("(")[0]}`;
       }
@@ -335,12 +414,6 @@ export class FileContext {
       if (tokens.includes("extension")) {
         return `extension ${tokens[tokens.indexOf("extension") + 1]}`;
       }
-      if (wsTokens[0] === "import") return `import ${wsTokens.slice(1).join(" ")}`;
-      if (wsTokens[0] === "export") {
-        const rest = wsTokens.slice(1).join(" ");
-        return `export ${rest.substring(0, 40)}`;
-      }
-      if (wsTokens[0] === "@") return `decorator ${wsTokens[0].slice(1)}`;
     }
 
     return line.substring(0, 50);

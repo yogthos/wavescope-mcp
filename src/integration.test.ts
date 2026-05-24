@@ -68,7 +68,8 @@ describe("edge cases", () => {
     const ctx = new FileContext("empty.py", "");
     expect(ctx.lineCount).toBe(0);
     expect(ctx.signal.length).toBe(0);
-    expect(ctx.coefficients.coefficients.length).toBe(0);
+    expect(ctx.coefficients.scales.length).toBe(8);
+    expect(ctx.coefficients.coefficients.every((c) => c.length === 0)).toBe(true);
 
     const positions = ctx.getImportantPositions(0.3, 10);
     expect(positions).toEqual([]);
