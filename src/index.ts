@@ -9,6 +9,9 @@ import {
   evictExpiredProjects,
   evictFractionProjects,
 } from "./project.js";
+import { FileContext } from "./context.js";
+import { diffFileContext } from "./diff.js";
+import { readFileAtRef, findGitRoot } from "./git.js";
 
 // ─── Shared file cache ────────────────────────────────────────
 
@@ -206,6 +209,99 @@ server.registerTool(
         const summary = ctx.getSummaryAtScale(start, end, scale);
         return {
           content: [{ type: "text" as const, text: summary }],
+        };
+      } catch (err) {
+        return toolErrorResponse(curateFsError(err));
+      }
+    }),
+);
+
+// ─── diff_wavelet_context ──────────────────────────────────
+
+server.registerTool(
+  "diff_wavelet_context",
+  {
+    description:
+      "Compare wavelet structural boundaries of a file between two git revisions. " +
+      "Shows which structural peaks (function/class boundaries, imports, etc.) were " +
+      "added, removed, shifted, or changed in magnitude. " +
+      "Omit targetRef to compare against the current working tree.",
+    inputSchema: {
+      file: z.string().describe("Absolute path to the file"),
+      baseRef: z.string().describe("Base git ref (e.g. 'HEAD~1', 'main', a commit SHA)"),
+      targetRef: z.string().optional().describe(
+        "Target git ref. Omit to compare against the current working tree.",
+      ),
+      minCoefficient: z.number().min(0).max(10).default(0.3).describe(
+        "Minimum wavelet coefficient threshold for peak detection. Lower = more peaks. Default 0.3.",
+      ),
+      limit: z.number().int().min(1).max(500).default(100).describe(
+        "Maximum number of peaks to detect per revision. Default 100.",
+      ),
+    },
+  },
+  ({ file, baseRef, targetRef, minCoefficient, limit }) =>
+    track(async () => {
+      try {
+        // Resolve the file path
+        const absFile = resolve(file);
+
+        // Find git root from the file's directory
+        let repoRoot: string;
+        try {
+          repoRoot = findGitRoot(absFile);
+        } catch {
+          throw new ToolError("File is not in a git repository");
+        }
+
+        // Read base revision
+        let baseContent: string;
+        try {
+          baseContent = await readFileAtRef(repoRoot, absFile, baseRef);
+        } catch (err) {
+          throw new ToolError(
+            `Cannot read file at ref "${baseRef}": ${(err as Error).message}`,
+          );
+        }
+
+        // Read target revision (or working tree)
+        let targetContent: string;
+        if (targetRef) {
+          try {
+            targetContent = await readFileAtRef(repoRoot, absFile, targetRef);
+          } catch (err) {
+            throw new ToolError(
+              `Cannot read file at ref "${targetRef}": ${(err as Error).message}`,
+            );
+          }
+        } else {
+          // Use working tree via FileCache for freshness
+          const ctx = await getFileContext(absFile);
+          targetContent = ctx.lines.join("\n");
+        }
+
+        const baseCtx = new FileContext(absFile, baseContent);
+        const targetCtx = new FileContext(absFile, targetContent);
+
+        const basePeaks = baseCtx.getImportantPositions(
+          minCoefficient,
+          limit,
+        ).map((p) => ({ position: p.position, coefficient: p.coefficient, scale: p.scale }));
+
+        const targetPeaks = targetCtx.getImportantPositions(
+          minCoefficient,
+          limit,
+        ).map((p) => ({ position: p.position, coefficient: p.coefficient, scale: p.scale }));
+
+        const result = diffFileContext(
+          basePeaks,
+          targetPeaks,
+          baseCtx.lineCount,
+          targetCtx.lineCount,
+        );
+
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
         };
       } catch (err) {
         return toolErrorResponse(curateFsError(err));
