@@ -133,6 +133,43 @@ for each kind.
 
 Requires the file to be inside a git repository.
 
+#### `update_cursor_position`
+
+Notify the server of the editor's current cursor position. The server
+precomputes wavelet context around the cursor so that subsequent
+`get_cursor_context` calls return instantly. Call this whenever the
+cursor moves significantly.
+
+- `file` — absolute path to the file
+- `line` — cursor line (0-indexed)
+- `column` — cursor column (0-indexed)
+
+Returns `{ acknowledged: true }`.
+
+#### `get_cursor_context`
+
+Get the precomputed multi-resolution wavelet context around the
+editor's last known cursor position. Returns the cached result from
+`update_cursor_position` without recomputation. Returns an error if
+no cursor has been registered for the file.
+
+- `file` — absolute path to the file
+
+Return shape matches `query_wavelet_context`: `center`, `clamped`,
+`bands` (fine/medium/coarse), and `waveletPeaks`.
+
+#### `get_cursor_important_positions`
+
+Get structurally important positions near the current cursor, sorted
+by a combination of proximity and structural significance. Returns
+an error if no cursor has been registered for the file.
+
+- `file` — absolute path to the file
+- `limit` — max positions to return, 1–50 (default 10)
+
+Returns an array of `{ position, coefficient, scale, label }` objects,
+sorted closest-to-cursor first.
+
 ## Development
 
 ```bash
