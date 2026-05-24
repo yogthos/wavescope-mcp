@@ -2,6 +2,7 @@ import { readdir, readFile, lstat, stat, realpath } from "node:fs/promises";
 import { open } from "node:fs/promises";
 import { join, basename, extname, relative, resolve, sep } from "node:path";
 import { FileContext, ImportantPosition } from "./context.js";
+import { FileCache } from "./file-cache.js";
 import { configs } from "./language.js";
 
 const CODE_EXTENSIONS = new Set(
@@ -74,6 +75,50 @@ function evictProjectCache() {
   }
 }
 
+/**
+ * Remove project cache entries whose timestamp is older than TTL.
+ * Exported for the periodic cleanup sweep in the server entry point.
+ */
+export function evictExpiredProjects(now: number = Date.now()): number {
+  let count = 0;
+  for (const [key, entry] of projectCache) {
+    if (now - entry.timestamp >= CACHE_TTL_MS) {
+      projectCache.delete(key);
+      count++;
+    }
+  }
+  return count;
+}
+
+/**
+ * Force-evict the oldest `fraction` of project cache entries.
+ * Exported for the memory watchdog in the server entry point.
+ */
+export function evictFractionProjects(fraction: number): number {
+  if (projectCache.size === 0) return 0;
+  const capped = Math.min(Math.max(fraction, 0), 1);
+  const toEvict = Math.max(1, Math.floor(projectCache.size * capped));
+  const entries = [...projectCache.entries()].sort(
+    (a, b) => a[1].timestamp - b[1].timestamp,
+  );
+  let count = 0;
+  for (let i = 0; i < toEvict && i < entries.length; i++) {
+    projectCache.delete(entries[i][0]);
+    count++;
+  }
+  return count;
+}
+
+/** Exported for tests */
+export function __test_clearProjectCache(): void {
+  projectCache.clear();
+}
+
+/** Exported for tests */
+export function __test_projectCacheSize(): number {
+  return projectCache.size;
+}
+
 // ─── ProjectIndex ───────────────────────────────────────────
 
 /**
@@ -101,7 +146,10 @@ export class ProjectIndex {
     );
   }
 
-  static async load(root: string): Promise<ProjectIndex> {
+  static async load(
+    root: string,
+    fileCache?: FileCache,
+  ): Promise<ProjectIndex> {
     const resolved = resolve(root);
 
     const cached = projectCache.get(resolved);
@@ -114,7 +162,7 @@ export class ProjectIndex {
 
     const loadPromise = (async () => {
       try {
-        const { files, truncated } = await discoverFiles(resolved);
+        const { files, truncated } = await discoverFiles(resolved, fileCache);
         const project = new ProjectIndex(resolved, files, truncated);
         evictProjectCache();
         projectCache.set(resolved, { project, timestamp: Date.now() });
@@ -276,7 +324,10 @@ async function isBinary(fullPath: string): Promise<boolean> {
   }
 }
 
-async function discoverFiles(root: string): Promise<DiscoverResult> {
+async function discoverFiles(
+  root: string,
+  fileCache?: FileCache,
+): Promise<DiscoverResult> {
   const results: ProjectFile[] = [];
   const visitedRealpaths = new Set<string>();
   let rootRealpath: string;
@@ -294,7 +345,7 @@ async function discoverFiles(root: string): Promise<DiscoverResult> {
   let truncated = false;
 
   // Concurrency-bounded file processor
-  const pending: Array<{ fullPath: string; size: number }> = [];
+  const pending: Array<{ fullPath: string; size: number; mtimeMs: number }> = [];
 
   async function walk(dir: string): Promise<void> {
     if (truncated) return;
@@ -357,7 +408,7 @@ async function discoverFiles(root: string): Promise<DiscoverResult> {
           truncated = true;
           return;
         }
-        pending.push({ fullPath, size: entryStat.size });
+        pending.push({ fullPath, size: entryStat.size, mtimeMs: entryStat.mtimeMs });
       }
     }
   }
@@ -370,7 +421,7 @@ async function discoverFiles(root: string): Promise<DiscoverResult> {
   async function worker() {
     while (cursor < pending.length) {
       const idx = cursor++;
-      const { fullPath } = pending[idx];
+      const { fullPath, mtimeMs } = pending[idx];
       if (await isBinary(fullPath)) continue;
       let content: string;
       try {
@@ -378,11 +429,15 @@ async function discoverFiles(root: string): Promise<DiscoverResult> {
       } catch {
         continue;
       }
+      const ctx = new FileContext(basename(fullPath), content);
       results.push({
         filename: basename(fullPath),
         path: fullPath,
-        context: new FileContext(basename(fullPath), content),
+        context: ctx,
       });
+      if (fileCache) {
+        fileCache.put(fullPath, ctx, mtimeMs);
+      }
     }
   }
   await Promise.all(

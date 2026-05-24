@@ -1,55 +1,19 @@
 #!/usr/bin/env node
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { readFile, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
-import { FileContext } from "./context.js";
-import { ProjectIndex } from "./project.js";
+import { FileCache } from "./file-cache.js";
+import {
+  ProjectIndex,
+  evictExpiredProjects,
+  evictFractionProjects,
+} from "./project.js";
 
-interface CacheEntry {
-  ctx: FileContext;
-  ts: number;
-  mtimeMs: number;
-}
+// ─── Shared file cache ────────────────────────────────────────
 
-const fileCache = new Map<string, CacheEntry>();
-const CACHE_TTL = 60_000;
-const MAX_CACHE_ENTRIES = 200;
-
-function norm(path: string): string {
-  return resolve(path);
-}
-
-function evictCache() {
-  if (fileCache.size > MAX_CACHE_ENTRIES) {
-    const entries = [...fileCache.entries()].sort(
-      (a, b) => a[1].ts - b[1].ts,
-    );
-    const toDelete = entries.slice(0, fileCache.size - MAX_CACHE_ENTRIES);
-    for (const [key] of toDelete) fileCache.delete(key);
-  }
-}
-
-async function getFileContext(filePath: string): Promise<FileContext> {
-  const key = norm(filePath);
-  const st = await stat(key);
-  const mtimeMs = st.mtimeMs;
-  const cached = fileCache.get(key);
-  if (
-    cached &&
-    Date.now() - cached.ts < CACHE_TTL &&
-    cached.mtimeMs === mtimeMs
-  ) {
-    return cached.ctx;
-  }
-
-  const content = await readFile(key, "utf-8");
-  const ctx = new FileContext(key, content);
-  fileCache.set(key, { ctx, ts: Date.now(), mtimeMs });
-  evictCache();
-  return ctx;
-}
+const fileCache = new FileCache(60_000, 200);
+const getFileContext = (filePath: string) => fileCache.get(filePath);
 
 // ─── Curated error helpers ───────────────────────────────────
 
@@ -156,7 +120,7 @@ server.registerTool(
         }
         let positions;
         if (directory) {
-          const project = await ProjectIndex.load(norm(directory));
+          const project = await ProjectIndex.load(resolve(directory), fileCache);
           positions = project.getImportantPositions(min_coefficient, limit);
         } else {
           const ctx = await getFileContext(file!);
@@ -256,11 +220,55 @@ async function main() {
   await server.connect(transport);
   console.error("WaveScope MCP server running on stdio");
 
+  // ─── Periodic cache cleanup (every 30s) ──────────────────────
+
+  const CLEANUP_INTERVAL_MS = 30_000;
+  const cleanupTimer = setInterval(() => {
+    const now = Date.now();
+    const fileEvicted = fileCache.evictExpired(now);
+    const projectEvicted = evictExpiredProjects(now);
+    if (fileEvicted > 0 || projectEvicted > 0) {
+      console.error(
+        `[Cache] Evicted ${fileEvicted} file(s), ${projectEvicted} project(s)`,
+      );
+    }
+  }, CLEANUP_INTERVAL_MS);
+  cleanupTimer.unref();
+
+  // ─── Memory watchdog (every 60s) ─────────────────────────────
+
+  const HEAP_WARNING_MB = 400;
+  const HEAP_CRITICAL_MB = 800;
+  const WATCHDOG_INTERVAL_MS = 60_000;
+  const memoryTimer = setInterval(() => {
+    const heapMB = process.memoryUsage().heapUsed / 1024 / 1024;
+    if (heapMB > HEAP_CRITICAL_MB) {
+      console.error(
+        `[Memory] Heap ${Math.round(heapMB)}MB > ${HEAP_CRITICAL_MB}MB critical, force-evicting 75%`,
+      );
+      fileCache.evictFraction(0.75);
+      evictFractionProjects(0.75);
+    } else if (heapMB > HEAP_WARNING_MB) {
+      console.error(
+        `[Memory] Heap ${Math.round(heapMB)}MB > ${HEAP_WARNING_MB}MB warning, force-evicting 25%`,
+      );
+      fileCache.evictFraction(0.25);
+      evictFractionProjects(0.25);
+    }
+  }, WATCHDOG_INTERVAL_MS);
+  memoryTimer.unref();
+
+  // ─── Graceful shutdown ────────────────────────────────────────
+
   let shuttingDown = false;
-  const shutdown = async () => {
+  const shutdown = async (reason?: string) => {
     if (shuttingDown) return;
     shuttingDown = true;
-    console.error("Shutting down...");
+    console.error(`Shutting down${reason ? ` (${reason})` : ""}...`);
+
+    clearInterval(cleanupTimer);
+    clearInterval(memoryTimer);
+
     // Wait up to 5s for in-flight handlers to complete
     const deadline = Date.now() + 5000;
     while (inFlight > 0 && Date.now() < deadline) {
@@ -269,8 +277,10 @@ async function main() {
     await server.close();
     process.exit(0);
   };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.stdin.on("end", () => shutdown("stdin EOF"));
+  process.stdin.on("close", () => shutdown("stdin closed"));
 }
 
 // Skip the server bootstrap when imported by tests.
@@ -286,4 +296,4 @@ if (!process.env.VITEST) {
 export const __test_getFileContext = getFileContext;
 export const __test_clearCache = () => fileCache.clear();
 export const __test_cacheSize = () => fileCache.size;
-export const __test_MAX_CACHE_ENTRIES = MAX_CACHE_ENTRIES;
+export const __test_MAX_CACHE_ENTRIES = fileCache.maxEntries;

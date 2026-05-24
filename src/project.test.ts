@@ -2,7 +2,15 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdir, writeFile, rm, symlink } from "node:fs/promises";
 import { join, relative } from "node:path";
 import { tmpdir } from "node:os";
-import { ProjectIndex, MAX_FILE_BYTES, MAX_FILES } from "./project.js";
+import {
+  ProjectIndex,
+  MAX_FILE_BYTES,
+  MAX_FILES,
+  evictExpiredProjects,
+  evictFractionProjects,
+  __test_clearProjectCache,
+  __test_projectCacheSize,
+} from "./project.js";
 
 const testDir = join(tmpdir(), `wavescope-test-${Date.now()}`);
 
@@ -274,6 +282,63 @@ describe("ProjectIndex — path normalization", () => {
       expect(p1).toBe(p2);
     } finally {
       await rm(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("ProjectCache — cleanup", () => {
+  it("evictExpiredProjects removes stale entries", async () => {
+    __test_clearProjectCache();
+    expect(__test_projectCacheSize()).toBe(0);
+
+    const dir = join(tmpdir(), `wavescope-projc-${Date.now()}`);
+    await mkdir(dir, { recursive: true });
+    try {
+      await writeFile(join(dir, "a.ts"), "export {};\n");
+      await ProjectIndex.load(dir);
+      expect(__test_projectCacheSize()).toBe(1);
+
+      // Force-expire by using a future timestamp
+      const future = Date.now() + 120_000;
+      const evicted = evictExpiredProjects(future);
+      expect(evicted).toBe(1);
+      expect(__test_projectCacheSize()).toBe(0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("evictFractionProjects removes fraction of entries", async () => {
+    __test_clearProjectCache();
+
+    const dir1 = join(tmpdir(), `wavescope-projf-${Date.now()}-1`);
+    const dir2 = join(tmpdir(), `wavescope-projf-${Date.now()}-2`);
+    const dir3 = join(tmpdir(), `wavescope-projf-${Date.now()}-3`);
+    const dir4 = join(tmpdir(), `wavescope-projf-${Date.now()}-4`);
+    try {
+      await mkdir(dir1, { recursive: true });
+      await mkdir(dir2, { recursive: true });
+      await mkdir(dir3, { recursive: true });
+      await mkdir(dir4, { recursive: true });
+      await writeFile(join(dir1, "a.ts"), "export {};\n");
+      await writeFile(join(dir2, "a.ts"), "export {};\n");
+      await writeFile(join(dir3, "a.ts"), "export {};\n");
+      await writeFile(join(dir4, "a.ts"), "export {};\n");
+
+      await ProjectIndex.load(dir1);
+      await ProjectIndex.load(dir2);
+      await ProjectIndex.load(dir3);
+      await ProjectIndex.load(dir4);
+      expect(__test_projectCacheSize()).toBe(4);
+
+      const evicted = evictFractionProjects(0.5);
+      expect(evicted).toBe(2);
+      expect(__test_projectCacheSize()).toBe(2);
+    } finally {
+      await rm(dir1, { recursive: true, force: true });
+      await rm(dir2, { recursive: true, force: true });
+      await rm(dir3, { recursive: true, force: true });
+      await rm(dir4, { recursive: true, force: true });
     }
   });
 });
