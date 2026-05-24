@@ -112,6 +112,27 @@ Compressed view of a region using specified scale peaks.
 - `file`, `start`, `end`, `scale` (optional — auto-selected based on
   region size if omitted: ≤50 lines → 2, ≤200 → 8, ≤800 → 32, >800 → 128)
 
+#### `diff_wavelet_context`
+
+Compare structural wavelet peak profiles of a file between two git revisions.
+Shows which structural boundaries (function/class definitions, imports, etc.)
+were added, removed, shifted, or changed in magnitude.
+
+- `file` — absolute path to the file
+- `baseRef` — base git ref (e.g. `"HEAD~1"`, `"main"`, a commit SHA)
+- `targetRef` — target git ref (optional; omit to compare against the
+  current working tree)
+- `minCoefficient` — minimum wavelet coefficient threshold, 0–10 (default 0.3)
+- `limit` — max peaks per revision, 1–500 (default 100)
+
+Returns `{ beforeLineCount, afterLineCount, diff: { changes, summary } }`
+where each change has `kind` (one of `added`, `removed`, `shifted`,
+`magnitudeChanged`, `unchanged`), `before` (the old peak, null for added),
+and `after` (the new peak, null for removed). The `summary` tallies counts
+for each kind.
+
+Requires the file to be inside a git repository.
+
 ## Development
 
 ```bash
