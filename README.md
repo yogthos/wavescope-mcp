@@ -125,19 +125,6 @@ pnpm typecheck       # Type check only
 `pnpm install` runs the `prepare` script, which builds `dist/` automatically.
 For a manual build, run `pnpm build`.
 
-## Architecture
-
-```
-src/
-├── index.ts       # MCP server entry, tool handlers
-├── signal.ts      # Per-line structural importance signal
-├── wavelet.ts     # Ricker CWT + peak detection
-├── context.ts     # FileContext: query_wavelet_context, get_important_positions, etc.
-├── project.ts     # ProjectIndex: multi-file discovery and indexing
-├── language.ts    # Language-specific keyword weights
-└── *.test.ts      # Tests
-```
-
 ## Supported languages
 
 Python (`.py`, `.pyi`, `.pyx`), TypeScript (`.ts`, `.tsx`, `.mts`, `.cts`),
