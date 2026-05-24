@@ -9,6 +9,7 @@ import {
   evictExpiredProjects,
   evictFractionProjects,
 } from "./project.js";
+import { CursorManager } from "./cursor.js";
 import { FileContext } from "./context.js";
 import { diffFileContext } from "./diff.js";
 import { readFileAtRef, findGitRoot } from "./git.js";
@@ -17,6 +18,7 @@ import { readFileAtRef, findGitRoot } from "./git.js";
 
 const fileCache = new FileCache(60_000, 200);
 const getFileContext = (filePath: string) => fileCache.get(filePath);
+const cursorManager = new CursorManager(60_000, 50);
 
 // ─── Curated error helpers ───────────────────────────────────
 
@@ -243,10 +245,8 @@ server.registerTool(
   ({ file, baseRef, targetRef, minCoefficient, limit }) =>
     track(async () => {
       try {
-        // Resolve the file path
         const absFile = resolve(file);
 
-        // Find git root from the file's directory
         let repoRoot: string;
         try {
           repoRoot = findGitRoot(absFile);
@@ -254,7 +254,6 @@ server.registerTool(
           throw new ToolError("File is not in a git repository");
         }
 
-        // Read base revision
         let baseContent: string;
         try {
           baseContent = await readFileAtRef(repoRoot, absFile, baseRef);
@@ -264,7 +263,6 @@ server.registerTool(
           );
         }
 
-        // Read target revision (or working tree)
         let targetCtx: FileContext;
         if (targetRef) {
           try {
@@ -276,7 +274,6 @@ server.registerTool(
             );
           }
         } else {
-          // Use working tree via FileCache for freshness (avoids re-parsing)
           targetCtx = await getFileContext(absFile);
         }
 
@@ -308,6 +305,107 @@ server.registerTool(
     }),
 );
 
+// ─── update_cursor_position ────────────────────────────────
+
+server.registerTool(
+  "update_cursor_position",
+  {
+    description:
+      "Notify the server of the editor's current cursor position. " +
+      "The server precomputes wavelet context around the cursor so " +
+      "that subsequent get_cursor_context calls return instantly. " +
+      "Call this whenever the cursor moves significantly.",
+    inputSchema: {
+      file: z.string().describe("Absolute path to the file"),
+      line: z.number().int().min(0).describe(
+        "Cursor line number (0-indexed)",
+      ),
+      column: z.number().int().min(0).describe(
+        "Cursor column number (0-indexed)",
+      ),
+    },
+  },
+  ({ file, line, column }) =>
+    track(async () => {
+      try {
+        const ctx = await getFileContext(file);
+        cursorManager.updateCursor(ctx, file, line, column);
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({ acknowledged: true }),
+          }],
+        };
+      } catch (err) {
+        return toolErrorResponse(curateFsError(err));
+      }
+    }),
+);
+
+// ─── get_cursor_context ────────────────────────────────────
+
+server.registerTool(
+  "get_cursor_context",
+  {
+    description:
+      "Get precomputed multi-resolution wavelet context around the " +
+      "editor's current cursor position. Returns cached result from " +
+      "the last update_cursor_position call. Returns null if no " +
+      "cursor position has been registered for this file.",
+    inputSchema: {
+      file: z.string().describe("Absolute path to the file"),
+    },
+  },
+  ({ file }) =>
+    track(async () => {
+      const context = cursorManager.getProactiveContext(file);
+      if (!context) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({ error: "No cursor registered for this file" }),
+          }],
+        };
+      }
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(context, null, 2) }],
+      };
+    }),
+);
+
+// ─── get_cursor_important_positions ─────────────────────────
+
+server.registerTool(
+  "get_cursor_important_positions",
+  {
+    description:
+      "Get structurally important positions near the current cursor, " +
+      "sorted by a combination of proximity and structural significance. " +
+      "Returns null if no cursor position has been registered for this file.",
+    inputSchema: {
+      file: z.string().describe("Absolute path to the file"),
+      limit: z.number().int().min(1).max(50).default(10).describe(
+        "Maximum number of positions to return. Default 10.",
+      ),
+    },
+  },
+  ({ file, limit }) =>
+    track(async () => {
+      const positions = cursorManager.getCursorImportantPositions(file, limit);
+      if (!positions) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({ error: "No cursor registered for this file" }),
+          }],
+        };
+      }
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(positions, null, 2) }],
+      };
+    }),
+);
+
 // ─── start ─────────────────────────────────────────────────
 
 async function main() {
@@ -322,9 +420,10 @@ async function main() {
     const now = Date.now();
     const fileEvicted = fileCache.evictExpired(now);
     const projectEvicted = evictExpiredProjects(now);
-    if (fileEvicted > 0 || projectEvicted > 0) {
+    const cursorEvicted = cursorManager.evictExpired(now);
+    if (fileEvicted > 0 || projectEvicted > 0 || cursorEvicted > 0) {
       console.error(
-        `[Cache] Evicted ${fileEvicted} file(s), ${projectEvicted} project(s)`,
+        `[Cache] Evicted ${fileEvicted} file(s), ${projectEvicted} project(s), ${cursorEvicted} cursor(s)`,
       );
     }
   }, CLEANUP_INTERVAL_MS);
@@ -363,6 +462,7 @@ async function main() {
 
     clearInterval(cleanupTimer);
     clearInterval(memoryTimer);
+    cursorManager.shutdown();
 
     // Wait up to 5s for in-flight handlers to complete
     const deadline = Date.now() + 5000;
@@ -392,3 +492,4 @@ export const __test_getFileContext = getFileContext;
 export const __test_clearCache = () => fileCache.clear();
 export const __test_cacheSize = () => fileCache.size;
 export const __test_MAX_CACHE_ENTRIES = fileCache.maxEntries;
+export const __test_cursorManager = cursorManager;
