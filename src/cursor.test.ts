@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { resolve } from "node:path";
 import { CursorManager } from "./cursor.js";
 import { FileContext } from "./context.js";
 
@@ -98,6 +99,38 @@ describe("CursorManager", () => {
     expect(sameContext!.center).toBe(initialContext!.center);
   });
 
+  it("uses fresh FileContext even when debounced (stale-context bug)", () => {
+    // Simulate file change on disk: ctx1 is the old version, ctx2 is new.
+    const ctx1 = new FileContext("test.py", samplePython);
+
+    // New version with an extra class (produces different important positions)
+    const newContent = samplePython + `
+
+class NewProcessor:
+    """Added after the fact."""
+
+    def run(self):
+        pass
+`;
+    const ctx2 = new FileContext("test.py", newContent);
+
+    // Initial update
+    manager.updateCursor(ctx1, "test.py", 10, 4);
+
+    // Small cursor move within debounce threshold, but with new FileContext
+    manager.updateCursor(ctx2, "test.py", 12, 4);
+
+    // getCursorImportantPositions must use the new context (ctx2)
+    const positions = manager.getCursorImportantPositions("test.py", 50);
+    expect(positions).not.toBeNull();
+
+    // ctx2 has more structural peaks than ctx1 (extra class)
+    const ctx1Positions = ctx1.getImportantPositions(0.1, 50);
+    const ctx2Positions = ctx2.getImportantPositions(0.1, 50);
+    expect(ctx2Positions.length).toBeGreaterThan(ctx1Positions.length);
+    expect(positions!.length).toBe(ctx2Positions.length);
+  });
+
   it("recomputes proactive context on significant cursor move", () => {
     const ctx = new FileContext("test.py", samplePython);
 
@@ -128,8 +161,8 @@ describe("CursorManager", () => {
     const ctx = new FileContext("test.py", samplePython);
     manager.updateCursor(ctx, "test.py", 10, 4);
 
-    // Artificially age
-    const entry = (manager as any).cursors.get("test.py");
+    // Artificially age — use normalized key
+    const entry = (manager as any).cursors.get(resolve("test.py"));
     entry!.timestamp = Date.now() - 60_000;
 
     manager.evictExpired(Date.now());
@@ -157,6 +190,16 @@ describe("CursorManager", () => {
       (p) => Math.abs(p.position - 21) <= 10,
     );
     expect(near.length).toBeGreaterThan(0);
+  });
+
+  it("normalizes file paths so /a/./b and /a/b share the same entry", () => {
+    const ctx = new FileContext("/abs/test.py", samplePython);
+    manager.updateCursor(ctx, "/abs/./test.py", 10, 4);
+
+    // Same logical file via different path spelling
+    const pos = manager.getCursor("/abs/test.py");
+    expect(pos).not.toBeNull();
+    expect(pos!.line).toBe(10);
   });
 
   it("getCursorImportantPositions returns null for unknown file", () => {

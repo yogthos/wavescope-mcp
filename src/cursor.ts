@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { FileContext, WaveletContextResult, ImportantPosition } from "./context.js";
 
 export interface CursorPosition {
@@ -35,6 +36,10 @@ export class CursorManager {
     readonly maxEntries: number = 50,
   ) {}
 
+  private norm(path: string): string {
+    return resolve(path);
+  }
+
   /**
    * Update the cursor position for a file. Recomputes proactive
    * context only when the cursor has moved significantly.
@@ -45,26 +50,28 @@ export class CursorManager {
     line: number,
     column: number,
   ): void {
-    const existing = this.cursors.get(file);
+    const key = this.norm(file);
+    const existing = this.cursors.get(key);
 
     if (existing) {
+      const prevLine = existing.cursor.line;
       existing.cursor = { line, column };
       existing.timestamp = Date.now();
+      existing.context = ctx;
 
       // Debounce: only recompute if cursor moved significantly
       if (
         existing.proactiveContext &&
-        Math.abs(existing.proactiveContext.center - line) < this.debounceLines
+        Math.abs(prevLine - line) < this.debounceLines
       ) {
         return;
       }
 
-      existing.context = ctx;
       existing.proactiveContext = ctx.queryWaveletContext(line, this.proactiveRadius);
     } else {
       const proactiveContext = ctx.queryWaveletContext(line, this.proactiveRadius);
-      this.cursors.set(file, {
-        file,
+      this.cursors.set(key, {
+        file: key,
         cursor: { line, column },
         context: ctx,
         proactiveContext,
@@ -76,7 +83,7 @@ export class CursorManager {
 
   /** Get the current cursor position for a file, or null. */
   getCursor(file: string): CursorPosition | null {
-    const entry = this.cursors.get(file);
+    const entry = this.cursors.get(this.norm(file));
     if (!entry) return null;
     entry.timestamp = Date.now();
     return { line: entry.cursor.line, column: entry.cursor.column };
@@ -87,7 +94,7 @@ export class CursorManager {
    * Returns null if no cursor is known for the file.
    */
   getProactiveContext(file: string): WaveletContextResult | null {
-    const entry = this.cursors.get(file);
+    const entry = this.cursors.get(this.norm(file));
     if (!entry) return null;
     entry.timestamp = Date.now();
     return entry.proactiveContext;
@@ -101,7 +108,7 @@ export class CursorManager {
     file: string,
     limit: number = 10,
   ): ImportantPosition[] | null {
-    const entry = this.cursors.get(file);
+    const entry = this.cursors.get(this.norm(file));
     if (!entry) return null;
     entry.timestamp = Date.now();
 
@@ -124,7 +131,7 @@ export class CursorManager {
 
   /** Remove a file from cursor tracking. */
   removeFile(file: string): void {
-    this.cursors.delete(file);
+    this.cursors.delete(this.norm(file));
   }
 
   /** Remove expired entries. Returns eviction count. */
