@@ -170,6 +170,38 @@ an error if no cursor has been registered for the file.
 Returns an array of `{ position, coefficient, scale, label }` objects,
 sorted closest-to-cursor first.
 
+#### `stream_start`
+
+Start a streaming project-wide query. Returns a `stream_id` immediately
+while results are computed in the background. Use `stream_poll` to fetch
+batches incrementally and `stream_close` to cancel.
+
+- `directory` — absolute path to the project directory
+- `min_coefficient` — minimum wavelet coefficient threshold, 0–10 (default 0.3)
+- `limit` — maximum total results across all batches, 1–100 (default 20)
+- `batch_size` — peaks per batch, 10–500 (default 50)
+
+Returns `{ stream_id: "<uuid>" }`.
+
+#### `stream_poll`
+
+Fetch the next batch of results from a streaming operation.
+
+- `stream_id` — the ID returned by `stream_start`
+
+Returns `{ peaks, more, complete }` where `more` indicates further
+batches are queued and `complete` means the operation has finished.
+Returns an error for unknown/expired stream IDs. If the producer
+encountered an error, returns `{ error, complete: true }`.
+
+#### `stream_close`
+
+Cancel a streaming operation and free its resources.
+
+- `stream_id` — the ID returned by `stream_start`
+
+Returns `{ acknowledged: true }`. Idempotent for unknown IDs.
+
 ## Development
 
 ```bash
