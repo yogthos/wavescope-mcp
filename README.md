@@ -1,5 +1,6 @@
 # WaveScope MCP
 
+[![SafeSkill 89/100](https://img.shields.io/badge/SafeSkill-89%2F100_Passes%20with%20Notes-yellow)](https://safeskill.dev/scan/yogthos-wavescope-mcp)
 Wavelet-based multi-resolution context management for LLMs via MCP.
 
 Provides a **zoomable view** of code files — the model can look at high-level
