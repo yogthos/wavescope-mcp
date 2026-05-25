@@ -55,14 +55,17 @@ export class CursorManager {
 
     if (existing) {
       const prevLine = existing.cursor.line;
+      const contextChanged = existing.context !== ctx;
       existing.cursor = { line, column };
       existing.timestamp = Date.now();
       existing.context = ctx;
 
-      // Debounce: only recompute if cursor moved significantly
+      // Debounce: skip recompute only when cursor hasn't moved much
+      // AND the underlying file hasn't changed on disk.
       if (
         existing.proactiveContext &&
-        Math.abs(prevLine - line) < this.debounceLines
+        Math.abs(prevLine - line) < this.debounceLines &&
+        !contextChanged
       ) {
         return;
       }

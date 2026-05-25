@@ -195,7 +195,7 @@ export class ProjectIndex {
     minCoefficient: number = 0.3,
     limit: number = 20,
   ): ImportantPosition[] {
-    const allPeaks: (ImportantPosition & { filename: string })[] = [];
+    const topPeaks: (ImportantPosition & { filename: string })[] = [];
 
     for (const file of this.files) {
       const peaks = file.context.getImportantPositions(
@@ -205,19 +205,21 @@ export class ProjectIndex {
       if (peaks.length === 0) continue;
       const fileRelPath = relative(this.root, file.path);
       for (const p of peaks) {
-        allPeaks.push({
+        topPeaks.push({
           ...p,
           label: `${p.label} (${fileRelPath})`,
           filename: fileRelPath,
         });
       }
+
+      // Keep only the top `limit` by |coefficient| to bound memory.
+      topPeaks.sort(
+        (a, b) => Math.abs(b.coefficient) - Math.abs(a.coefficient),
+      );
+      if (topPeaks.length > limit) topPeaks.length = limit;
     }
 
-    allPeaks.sort(
-      (a, b) => Math.abs(b.coefficient) - Math.abs(a.coefficient),
-    );
-
-    return allPeaks.slice(0, limit);
+    return topPeaks;
   }
 }
 
@@ -228,6 +230,8 @@ interface GitignoreRule {
   regex: RegExp;
   /** True if the rule only matches directories (pattern ends with `/`). */
   dirOnly: boolean;
+  /** True for `!` negation patterns that re-include previously excluded files. */
+  negate: boolean;
 }
 
 async function loadGitignore(root: string): Promise<GitignoreRule[]> {
@@ -241,10 +245,12 @@ async function loadGitignore(root: string): Promise<GitignoreRule[]> {
   const rules: GitignoreRule[] = [];
   for (const lineRaw of raw.split("\n")) {
     const line = lineRaw.trim();
-    if (!line || line.startsWith("#") || line.startsWith("!")) continue;
+    if (!line || line.startsWith("#")) continue;
+    const negate = line.startsWith("!");
     const dirOnly = line.endsWith("/");
-    const pat = dirOnly ? line.slice(0, -1) : line;
-    rules.push({ regex: compileGlob(pat), dirOnly });
+    const patRaw = negate ? line.slice(1) : line;
+    const pat = dirOnly ? patRaw.slice(0, -1) : patRaw;
+    rules.push({ regex: compileGlob(pat), dirOnly, negate });
   }
   return rules;
 }
@@ -287,13 +293,15 @@ function isIgnored(
   rules: GitignoreRule[],
 ): boolean {
   const normalized = relPath.split(sep).join("/");
+  // Process rules in order: last match wins (negation patterns re-include).
+  let ignored = false;
   for (const rule of rules) {
     if (rule.dirOnly && !isDir) continue;
-    if (rule.regex.test(normalized)) return true;
-    // Also test path with trailing slash for dir-only rules
-    if (rule.dirOnly && rule.regex.test(normalized + "/")) return true;
+    const matches = rule.regex.test(normalized) ||
+      (rule.dirOnly && rule.regex.test(normalized + "/"));
+    if (matches) ignored = !rule.negate;
   }
-  return false;
+  return ignored;
 }
 
 // ─── File discovery ─────────────────────────────────────────

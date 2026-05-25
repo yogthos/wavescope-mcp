@@ -51,6 +51,14 @@ describe("readFileAtRef", () => {
       readFileAtRef(repoRoot, "src/wavelet.ts", "--no-such-flag"),
     ).rejects.toThrow("must not start with '-'");
   });
+
+  it("rejects file paths that escape the repository", async () => {
+    // resolve to an absolute path outside the repo
+    const outsideFile = resolve("/tmp", "outside.txt");
+    await expect(
+      readFileAtRef(repoRoot, outsideFile, "HEAD"),
+    ).rejects.toThrow("outside the repository");
+  });
 });
 
 describe("findGitRoot", () => {

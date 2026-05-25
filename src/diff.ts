@@ -26,6 +26,7 @@ export interface FileDiffResult {
 }
 
 const DEFAULT_WINDOW = 2;
+const COEFF_EPSILON = 1e-10;
 
 /**
  * Diff two sets of wavelet peaks (e.g. from different git revisions of a file).
@@ -68,7 +69,7 @@ export function diffPeaks(
       usedBefore.add(bestIdx);
       const bp = before[bestIdx];
       if (bp.position === ap.position) {
-        if (bp.coefficient === ap.coefficient) {
+        if (Math.abs(bp.coefficient - ap.coefficient) < COEFF_EPSILON) {
           changes.push({ kind: "unchanged", before: bp, after: ap });
         } else {
           changes.push({ kind: "magnitudeChanged", before: bp, after: ap });

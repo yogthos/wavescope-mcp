@@ -17,8 +17,9 @@ function makePeak(
   position: number,
   coefficient: number,
   scale: number = 1,
+  label?: string,
 ): Peak {
-  return { position, coefficient, scale };
+  return { position, coefficient, scale, label };
 }
 
 describe("diffPeaks", () => {
@@ -99,6 +100,29 @@ describe("diffPeaks", () => {
     expect(changed).toBeDefined();
     expect(changed!.before!.coefficient).toBe(0.5);
     expect(changed!.after!.coefficient).toBe(1.2);
+  });
+
+  it("treats near-identical coefficients as unchanged (floating-point tolerance)", () => {
+    const before = [makePeak(10, 0.5)];
+    const after = [makePeak(10, 0.5 + 1e-15)];
+    const diff = diffPeaks(before, after);
+
+    expect(diff.summary.magnitudeChanged).toBe(0);
+    expect(diff.summary.unchanged).toBe(1);
+  });
+
+  it("preserves labels through the diff", () => {
+    const before = [makePeak(10, 0.9, 2, "class Foo")];
+    const after = [makePeak(10, 0.9, 2, "class Foo"), makePeak(30, 0.7, 4, "def bar")];
+    const diff = diffPeaks(before, after);
+
+    const unchanged = diff.changes.find((c) => c.kind === "unchanged");
+    expect(unchanged?.before?.label).toBe("class Foo");
+    expect(unchanged?.after?.label).toBe("class Foo");
+
+    const added = diff.changes.find((c) => c.kind === "added");
+    expect(added?.before).toBeNull();
+    expect(added?.after?.label).toBe("def bar");
   });
 
   it("handles empty before peaks", () => {

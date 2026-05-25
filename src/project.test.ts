@@ -139,6 +139,32 @@ describe("ProjectIndex", () => {
     expect(project.getFile("nonexistent.py")).toBeNull();
   });
 
+  it("returns project-wide important positions with low limit across many files", async () => {
+    const dir = join(tmpdir(), `wavescope-multifile-${Date.now()}`);
+    await mkdir(dir, { recursive: true });
+    try {
+      // Create 10 files, each with class and function peaks
+      for (let i = 0; i < 10; i++) {
+        await writeFile(
+          join(dir, `f${i}.ts`),
+          `export class C${i} {}\nexport function f${i}() {}\n`,
+        );
+      }
+      const project = await ProjectIndex.load(dir);
+      const positions = project.getImportantPositions(0.0, 5);
+
+      expect(positions.length).toBeLessThanOrEqual(5);
+      // Sorted by |coefficient| descending
+      for (let i = 1; i < positions.length; i++) {
+        expect(
+          Math.abs(positions[i - 1].coefficient),
+        ).toBeGreaterThanOrEqual(Math.abs(positions[i].coefficient));
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("lists all indexed files", async () => {
     const project = await ProjectIndex.load(testDir);
     expect(project.listFiles().length).toBeGreaterThanOrEqual(4);
@@ -170,6 +196,29 @@ describe("ProjectIndex — .gitignore", () => {
     expect(paths).not.toContain("foo.generated.ts");
     expect(paths).not.toContain("built/out.ts");
   });
+
+  it("supports negation patterns (!) to re-include files", async () => {
+    const negDir = join(tmpdir(), `wavescope-negate-${Date.now()}`);
+    await mkdir(negDir, { recursive: true });
+    try {
+      await writeFile(
+        join(negDir, ".gitignore"),
+        "generated/*.ts\n!generated/keep.ts\n",
+      );
+      await mkdir(join(negDir, "generated"), { recursive: true });
+      await writeFile(join(negDir, "generated", "drop.ts"), "export const x = 1;\n");
+      await writeFile(join(negDir, "generated", "keep.ts"), "export const y = 2;\n");
+      await writeFile(join(negDir, "app.ts"), "export {};\n");
+
+      const project = await ProjectIndex.load(negDir);
+      const paths = project.listFiles();
+      expect(paths).toContain("app.ts");
+      expect(paths).toContain("generated/keep.ts"); // re-included by negation
+      expect(paths).not.toContain("generated/drop.ts"); // excluded
+    } finally {
+      await rm(negDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("ProjectIndex — caps", () => {
@@ -180,6 +229,11 @@ describe("ProjectIndex — caps", () => {
 
   it("MAX_FILES exists and is reasonable", () => {
     expect(MAX_FILES).toBeGreaterThan(100);
+  });
+
+  it("reports truncated=false when under the file cap", async () => {
+    const project = await ProjectIndex.load(testDir);
+    expect(project.truncated).toBe(false);
   });
 
   it("skips files larger than MAX_FILE_BYTES", async () => {

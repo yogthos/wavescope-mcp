@@ -34,6 +34,7 @@ export interface Peak {
   position: number;
   coefficient: number;
   scale: number;
+  label?: string;
 }
 
 export type Boundary = "reflect" | "zero";

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, resolve, relative } from "node:path";
 import { z } from "zod";
 import { FileCache } from "./file-cache.js";
 import {
@@ -10,7 +10,7 @@ import {
   evictFractionProjects,
 } from "./project.js";
 import { CursorManager } from "./cursor.js";
-import { FileContext } from "./context.js";
+import { FileContext, ImportantPosition } from "./context.js";
 import { diffFileContext } from "./diff.js";
 import { readFileAtRef, findGitRoot } from "./git.js";
 import { StreamManager } from "./streaming.js";
@@ -39,7 +39,12 @@ function curateFsError(err: unknown): string {
   if (e?.code === "EACCES") return "Permission denied";
   if (e?.code === "EISDIR") return "Expected a file, got a directory";
   if (err instanceof ToolError) return err.message;
+  console.error("[wavescope] Internal error:", err);
   return "Internal error";
+}
+
+function requireAbsoluteFile(path: string): void {
+  if (!isAbsolute(path)) throw new ToolError("`file` must be an absolute path");
 }
 
 // ─── In-flight tracking for graceful shutdown ───────────────
@@ -79,6 +84,7 @@ server.registerTool(
   ({ file, center, radius }) =>
     track(async () => {
       try {
+        requireAbsoluteFile(file);
         const ctx = await getFileContext(file);
         const result = ctx.queryWaveletContext(center, radius);
         return {
@@ -106,8 +112,8 @@ server.registerTool(
       directory: z.string().optional().describe(
         "Absolute path to a project directory. Mutually exclusive with 'file'.",
       ),
-      min_coefficient: z.number().min(0).max(10).default(0.3).describe(
-        "Minimum wavelet coefficient threshold (0-10). Lower = more results. Default 0.3.",
+      min_coefficient: z.number().min(0).max(2).default(0.3).describe(
+        "Minimum wavelet coefficient threshold (0-2). Lower = more results. Default 0.3.",
       ),
       limit: z.number().int().min(1).max(100).default(20).describe(
         "Maximum number of positions to return. 1-100. Default 20.",
@@ -126,15 +132,17 @@ server.registerTool(
           throw new ToolError("Provide either 'file' or 'directory'");
         }
         let positions;
+        let truncated = false;
         if (directory) {
           const project = await ProjectIndex.load(resolve(directory), fileCache);
           positions = project.getImportantPositions(min_coefficient, limit);
+          truncated = project.truncated;
         } else {
           const ctx = await getFileContext(file!);
           positions = ctx.getImportantPositions(min_coefficient, limit);
         }
         return {
-          content: [{ type: "text" as const, text: JSON.stringify(positions, null, 2) }],
+          content: [{ type: "text" as const, text: JSON.stringify({ positions, truncated }, null, 2) }],
         };
       } catch (err) {
         return toolErrorResponse(curateFsError(err));
@@ -168,6 +176,7 @@ server.registerTool(
   ({ file, start, end, scale }) =>
     track(async () => {
       try {
+        requireAbsoluteFile(file);
         if (start > end) {
           throw new ToolError("`start` must be <= `end`");
         }
@@ -206,6 +215,7 @@ server.registerTool(
   ({ file, start, end, scale }) =>
     track(async () => {
       try {
+        requireAbsoluteFile(file);
         if (start > end) {
           throw new ToolError("`start` must be <= `end`");
         }
@@ -236,17 +246,22 @@ server.registerTool(
       targetRef: z.string().optional().describe(
         "Target git ref. Omit to compare against the current working tree.",
       ),
-      minCoefficient: z.number().min(0).max(10).default(0.3).describe(
+      minCoefficient: z.number().min(0).max(2).default(0.3).describe(
         "Minimum wavelet coefficient threshold for peak detection. Lower = more peaks. Default 0.3.",
       ),
       limit: z.number().int().min(1).max(500).default(100).describe(
         "Maximum number of peaks to detect per revision. Default 100.",
       ),
+      window: z.number().int().min(1).max(50).default(2).describe(
+        "Maximum line distance for matching peaks as 'shifted'. " +
+        "Higher values treat larger moves as shifts rather than remove+add. Default 2.",
+      ),
     },
   },
-  ({ file, baseRef, targetRef, minCoefficient, limit }) =>
+  ({ file, baseRef, targetRef, minCoefficient, limit, window }) =>
     track(async () => {
       try {
+        requireAbsoluteFile(file);
         const absFile = resolve(file);
 
         let repoRoot: string;
@@ -284,18 +299,19 @@ server.registerTool(
         const basePeaks = baseCtx.getImportantPositions(
           minCoefficient,
           limit,
-        ).map((p) => ({ position: p.position, coefficient: p.coefficient, scale: p.scale }));
+        );
 
         const targetPeaks = targetCtx.getImportantPositions(
           minCoefficient,
           limit,
-        ).map((p) => ({ position: p.position, coefficient: p.coefficient, scale: p.scale }));
+        );
 
         const result = diffFileContext(
           basePeaks,
           targetPeaks,
           baseCtx.lineCount,
           targetCtx.lineCount,
+          window,
         );
 
         return {
@@ -330,6 +346,7 @@ server.registerTool(
   ({ file, line, column }) =>
     track(async () => {
       try {
+        requireAbsoluteFile(file);
         const ctx = await getFileContext(file);
         cursorManager.updateCursor(ctx, file, line, column);
         return {
@@ -360,18 +377,18 @@ server.registerTool(
   },
   ({ file }) =>
     track(async () => {
-      const context = cursorManager.getProactiveContext(file);
-      if (!context) {
+      try {
+        requireAbsoluteFile(file);
+        const context = cursorManager.getProactiveContext(file);
+        if (!context) {
+          throw new ToolError("No cursor registered for this file");
+        }
         return {
-          content: [{
-            type: "text" as const,
-            text: JSON.stringify({ error: "No cursor registered for this file" }),
-          }],
+          content: [{ type: "text" as const, text: JSON.stringify(context, null, 2) }],
         };
+      } catch (err) {
+        return toolErrorResponse(curateFsError(err));
       }
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify(context, null, 2) }],
-      };
     }),
 );
 
@@ -393,18 +410,18 @@ server.registerTool(
   },
   ({ file, limit }) =>
     track(async () => {
-      const positions = cursorManager.getCursorImportantPositions(file, limit);
-      if (!positions) {
+      try {
+        requireAbsoluteFile(file);
+        const positions = cursorManager.getCursorImportantPositions(file, limit);
+        if (!positions) {
+          throw new ToolError("No cursor registered for this file");
+        }
         return {
-          content: [{
-            type: "text" as const,
-            text: JSON.stringify({ error: "No cursor registered for this file" }),
-          }],
+          content: [{ type: "text" as const, text: JSON.stringify(positions, null, 2) }],
         };
+      } catch (err) {
+        return toolErrorResponse(curateFsError(err));
       }
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify(positions, null, 2) }],
-      };
     }),
 );
 
@@ -419,8 +436,8 @@ server.registerTool(
       "Use this for long-running project-wide queries.",
     inputSchema: {
       directory: z.string().describe("Absolute path to the project directory"),
-      min_coefficient: z.number().min(0).max(10).default(0.3).describe(
-        "Minimum wavelet coefficient threshold (0-10). Default 0.3.",
+      min_coefficient: z.number().min(0).max(2).default(0.3).describe(
+        "Minimum wavelet coefficient threshold (0-2). Default 0.3.",
       ),
       limit: z.number().int().min(1).max(100).default(20).describe(
         "Maximum total results across all batches. Default 20.",
@@ -451,27 +468,57 @@ server.registerTool(
               return;
             }
 
-            // Collect all peaks first, sort globally by |coefficient|,
-            // then slice — matching the non-streaming path semantics.
-            const allPeaks = allFiles.flatMap((f) =>
-              f.context.getImportantPositions(min_coefficient, 500),
-            );
-            allPeaks.sort(
-              (a, b) => Math.abs(b.coefficient) - Math.abs(a.coefficient),
-            );
-            const sliced = allPeaks.slice(0, limit);
+            // Collect peaks with a bounded top-N list to keep memory O(limit)
+            // instead of O(files × 500). Each file's peaks are merged into
+            // the running top-N, truncated to `limit`, and discarded.
+            const topPeaks: (ImportantPosition & { filename: string })[] = [];
+
+            for (const f of allFiles) {
+              if (!streamManager.peek(streamId)) return; // cancelled or evicted
+
+              const peaks = f.context.getImportantPositions(
+                min_coefficient,
+                500,
+              );
+              if (peaks.length === 0) continue;
+
+              const fileRelPath = relative(root, f.path);
+              for (const p of peaks) {
+                topPeaks.push({
+                  ...p,
+                  label: `${p.label} (${fileRelPath})`,
+                  filename: fileRelPath,
+                });
+              }
+
+              // Keep only the top `limit` by |coefficient|
+              topPeaks.sort(
+                (a, b) => Math.abs(b.coefficient) - Math.abs(a.coefficient),
+              );
+              if (topPeaks.length > limit) topPeaks.length = limit;
+            }
 
             // Emit in chunks, yielding between batches so the consumer
             // can poll. peek() avoids refreshing the stream's TTL — only
             // the consumer's poll() should keep the stream alive.
-            for (let offset = 0; offset < sliced.length; offset += batch_size) {
+            for (
+              let offset = 0;
+              offset < topPeaks.length;
+              offset += batch_size
+            ) {
               if (!streamManager.peek(streamId)) return; // cancelled or evicted
-              const chunk = sliced.slice(offset, offset + batch_size);
-              const isLast = offset + batch_size >= sliced.length;
+              const chunk = topPeaks.slice(offset, offset + batch_size);
+              const isLast = offset + batch_size >= topPeaks.length;
               streamManager.appendBatch(streamId, chunk, isLast);
               if (!isLast) {
                 await new Promise<void>((r) => setImmediate(r));
               }
+            }
+
+            // Edge case: limit returned fewer peaks than batch_size, or
+            // all peaks were filtered out. Signal completion.
+            if (topPeaks.length === 0) {
+              streamManager.appendBatch(streamId, [], true);
             }
           } catch (err) {
             streamManager.markErrored(

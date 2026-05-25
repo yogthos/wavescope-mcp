@@ -1,5 +1,5 @@
 import { execFile, execFileSync } from "node:child_process";
-import { relative, resolve, isAbsolute, dirname } from "node:path";
+import { relative, resolve, isAbsolute, dirname, sep } from "node:path";
 
 /**
  * Read a file's content at a specific git ref.
@@ -23,9 +23,18 @@ export function readFileAtRef(
   }
 
   const normalizedRepo = resolve(repoPath);
+  const absFile = resolve(filePath);
   const relPath = isAbsolute(filePath)
-    ? relative(normalizedRepo, filePath)
+    ? relative(normalizedRepo, absFile)
     : filePath;
+
+  // Reject paths that escape the repository root.
+  const resolvedRel = resolve(normalizedRepo, relPath);
+  if (!resolvedRel.startsWith(normalizedRepo + sep) && resolvedRel !== normalizedRepo) {
+    return Promise.reject(
+      new Error(`File "${filePath}" is outside the repository`),
+    );
+  }
 
   const spec = `${ref}:${relPath}`;
 

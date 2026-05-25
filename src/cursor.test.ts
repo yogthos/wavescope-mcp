@@ -131,6 +131,33 @@ class NewProcessor:
     expect(positions!.length).toBe(ctx2Positions.length);
   });
 
+  it("recomputes proactiveContext when context object changes, even within debounce", () => {
+    const ctx1 = new FileContext("test.py", samplePython);
+    const newContent = samplePython + `
+
+class NewProcessor:
+    """Added after the fact."""
+
+    def run(self):
+        pass
+`;
+    const ctx2 = new FileContext("test.py", newContent);
+
+    // Cursor near the end of the original file
+    manager.updateCursor(ctx1, "test.py", 28, 4);
+    const firstContext = manager.getProactiveContext("test.py");
+    expect(firstContext).not.toBeNull();
+
+    // Small move within debounce, but with new FileContext
+    manager.updateCursor(ctx2, "test.py", 30, 4);
+    const secondContext = manager.getProactiveContext("test.py");
+
+    // proactiveContext must reflect the new file — fine band should
+    // include the newly added class
+    expect(secondContext).not.toBeNull();
+    expect(secondContext!.bands.fine.content).toContain("NewProcessor");
+  });
+
   it("recomputes proactive context on significant cursor move", () => {
     const ctx = new FileContext("test.py", samplePython);
 

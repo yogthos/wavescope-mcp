@@ -90,7 +90,7 @@ clamped), three `fine`/`medium`/`coarse` bands, and detected wavelet peaks.
 Find structural boundaries (class/function defs, imports, etc.).
 
 - exactly one of `file` (single file path) or `directory` (project-wide search)
-- `min_coefficient` — raw wavelet coefficient threshold, 0–10 (default 0.3).
+- `min_coefficient` — raw wavelet coefficient threshold, 0–2 (default 0.3).
   Same semantics in both single-file and project mode.
 - `limit` — max results, 1–100 (default 20)
 
@@ -122,8 +122,10 @@ were added, removed, shifted, or changed in magnitude.
 - `baseRef` — base git ref (e.g. `"HEAD~1"`, `"main"`, a commit SHA)
 - `targetRef` — target git ref (optional; omit to compare against the
   current working tree)
-- `minCoefficient` — minimum wavelet coefficient threshold, 0–10 (default 0.3)
+- `minCoefficient` — minimum wavelet coefficient threshold, 0–2 (default 0.3)
 - `limit` — max peaks per revision, 1–500 (default 100)
+- `window` — max line distance for matching peaks as "shifted", 1–50 (default 2).
+  Higher values treat larger moves as shifts rather than remove+add.
 
 Returns `{ beforeLineCount, afterLineCount, diff: { changes, summary } }`
 where each change has `kind` (one of `added`, `removed`, `shifted`,
@@ -177,7 +179,7 @@ while results are computed in the background. Use `stream_poll` to fetch
 batches incrementally and `stream_close` to cancel.
 
 - `directory` — absolute path to the project directory
-- `min_coefficient` — minimum wavelet coefficient threshold, 0–10 (default 0.3)
+- `min_coefficient` — minimum wavelet coefficient threshold, 0–2 (default 0.3)
 - `limit` — maximum total results across all batches, 1–100 (default 20)
 - `batch_size` — peaks per batch, 10–500 (default 50)
 
