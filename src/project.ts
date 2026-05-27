@@ -9,6 +9,10 @@ const CODE_EXTENSIONS = new Set(
   configs.flatMap((c) => c.extensions),
 );
 
+const CODE_FILENAMES = new Set(
+  configs.flatMap((c) => c.filenames ?? []),
+);
+
 const SKIP_DIRS = new Set([
   "node_modules",
   ".git",
@@ -149,6 +153,7 @@ export class ProjectIndex {
   static async load(
     root: string,
     fileCache?: FileCache,
+    signal?: AbortSignal,
   ): Promise<ProjectIndex> {
     const resolved = resolve(root);
 
@@ -157,12 +162,16 @@ export class ProjectIndex {
       return cached.project;
     }
 
-    const pending = pendingLoads.get(resolved);
-    if (pending) return pending;
+    // Don't share an in-flight load between an aborted caller and a
+    // non-aborted caller — the latter would inherit the former's abort.
+    if (!signal) {
+      const pending = pendingLoads.get(resolved);
+      if (pending) return pending;
+    }
 
     const loadPromise = (async () => {
       try {
-        const { files, truncated } = await discoverFiles(resolved, fileCache);
+        const { files, truncated } = await discoverFiles(resolved, fileCache, signal);
         const project = new ProjectIndex(resolved, files, truncated);
         evictProjectCache();
         projectCache.set(resolved, { project, timestamp: Date.now() });
@@ -172,7 +181,7 @@ export class ProjectIndex {
       }
     })();
 
-    pendingLoads.set(resolved, loadPromise);
+    if (!signal) pendingLoads.set(resolved, loadPromise);
     return loadPromise;
   }
 
@@ -332,10 +341,19 @@ async function isBinary(fullPath: string): Promise<boolean> {
   }
 }
 
+class AbortError extends Error {
+  readonly name = "AbortError";
+  constructor() { super("Operation aborted"); }
+}
+
 async function discoverFiles(
   root: string,
   fileCache?: FileCache,
+  signal?: AbortSignal,
 ): Promise<DiscoverResult> {
+  const abortIfRequested = () => {
+    if (signal?.aborted) throw new AbortError();
+  };
   const results: ProjectFile[] = [];
   const visitedRealpaths = new Set<string>();
   let rootRealpath: string;
@@ -357,6 +375,7 @@ async function discoverFiles(
 
   async function walk(dir: string): Promise<void> {
     if (truncated) return;
+    abortIfRequested();
     let entries: string[];
     try {
       entries = await readdir(dir);
@@ -366,6 +385,7 @@ async function discoverFiles(
 
     for (const entry of entries) {
       if (truncated) return;
+      abortIfRequested();
       const fullPath = join(dir, entry);
       const relPath = relative(root, fullPath);
 
@@ -410,8 +430,23 @@ async function discoverFiles(
       } else if (entryStat.isFile()) {
         if (isIgnored(relPath, false, gitignore)) continue;
         const ext = extname(entry).toLowerCase();
-        if (!CODE_EXTENSIONS.has(ext)) continue;
+        // Accept either a known code extension OR a recognized bare-filename
+        // (Rakefile, Gemfile, etc.) so filename-keyed language configs work
+        // in project mode the same way they do in single-file mode.
+        if (!CODE_EXTENSIONS.has(ext) && !CODE_FILENAMES.has(entry)) continue;
         if (entryStat.size > MAX_FILE_BYTES) continue;
+        // Dedup regular files via realpath the same way directories are
+        // deduped above. Two symlinks pointing at the same on-disk file
+        // would otherwise be indexed twice. realpath is cheap when nothing
+        // is a symlink (returns the same path).
+        let fileReal: string;
+        try {
+          fileReal = await realpath(fullPath);
+        } catch {
+          fileReal = fullPath;
+        }
+        if (visitedRealpaths.has(fileReal)) continue;
+        visitedRealpaths.add(fileReal);
         if (results.length + pending.length >= MAX_FILES) {
           truncated = true;
           return;
@@ -428,6 +463,7 @@ async function discoverFiles(
   let cursor = 0;
   async function worker() {
     while (cursor < pending.length) {
+      if (signal?.aborted) throw new AbortError();
       const idx = cursor++;
       const { fullPath, mtimeMs } = pending[idx];
       if (await isBinary(fullPath)) continue;

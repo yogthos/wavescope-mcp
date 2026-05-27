@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { resolve } from "node:path";
-import { CursorManager } from "./cursor.js";
-import { FileContext } from "./context.js";
+import { CursorManager, rankByProximityAndSignificance } from "./cursor.js";
+import { FileContext, ImportantPosition } from "./context.js";
 
 const samplePython = `#!/usr/bin/env python3
 """Data processing module."""
@@ -232,5 +232,185 @@ class NewProcessor:
   it("getCursorImportantPositions returns null for unknown file", () => {
     const positions = manager.getCursorImportantPositions("unknown.py");
     expect(positions).toBeNull();
+  });
+
+  describe("R1.6: proximity vs significance ranking (rankByProximityAndSignificance)", () => {
+    const mk = (position: number, coefficient: number): ImportantPosition => ({
+      position,
+      coefficient,
+      scale: 4,
+      label: `line ${position}`,
+    });
+
+    it("strong distant peak beats weak nearby peak", () => {
+      // Cursor at 50. Weak peak at 52 (close, coef 0.1) vs strong peak at
+      // 90 (40 lines away, coef 2.0). Normalized scores:
+      //   weak  = 2/100 - 0.1/2.0 = 0.02 - 0.05  = -0.03
+      //   strong= 40/100 - 2.0/2.0 = 0.4 - 1.0  = -0.6
+      // strong wins (lower score = better).
+      const ranked = rankByProximityAndSignificance(
+        [mk(52, 0.1), mk(90, 2.0)],
+        50,
+        10,
+      );
+      expect(ranked[0].position).toBe(90);
+      expect(ranked[1].position).toBe(52);
+    });
+
+    it("with equal coefficients, closer beats farther", () => {
+      const ranked = rankByProximityAndSignificance(
+        [mk(10, 0.8), mk(50, 0.8), mk(30, 0.8)],
+        20,
+        10,
+      );
+      expect(ranked.map((p) => p.position)).toEqual([10, 30, 50]);
+    });
+
+    it("with equal distance, stronger beats weaker", () => {
+      const ranked = rankByProximityAndSignificance(
+        [mk(45, 0.2), mk(55, 0.9)],
+        50,
+        10,
+      );
+      expect(ranked[0].position).toBe(55);
+    });
+
+    it("is deterministic across calls", () => {
+      const input = [
+        mk(10, 0.5),
+        mk(20, 0.5),
+        mk(30, 0.5),
+        mk(40, 0.5),
+      ];
+      const a = rankByProximityAndSignificance(input, 25, 4);
+      const b = rankByProximityAndSignificance(input, 25, 4);
+      expect(a).toEqual(b);
+    });
+
+    it("respects the limit", () => {
+      const ranked = rankByProximityAndSignificance(
+        [mk(10, 0.5), mk(20, 0.5), mk(30, 0.5), mk(40, 0.5)],
+        25,
+        2,
+      );
+      expect(ranked.length).toBe(2);
+    });
+
+    it("handles empty input", () => {
+      expect(rankByProximityAndSignificance([], 0, 10)).toEqual([]);
+    });
+
+    it("p90 normalization resists a single outlier coefficient", () => {
+      // Without p90 (i.e. with max), the outlier at coef=100 would
+      // compress every other peak's normalized significance to ~0, so the
+      // ranking among the rest would collapse to pure distance.
+      // With p90 the outlier sits outside the normalizer so moderate
+      // peaks retain useful contrast.
+      const cursor = 50;
+      const positions = [
+        mk(80, 100),  // outlier — close enough that we expect it first regardless
+        mk(45, 0.3),  // closer to cursor, moderate
+        mk(70, 0.9),  // farther, stronger moderate
+      ];
+      const ranked = rankByProximityAndSignificance(positions, cursor, 10);
+      // Outlier should win
+      expect(ranked[0].position).toBe(80);
+      // Between the two moderates, the stronger one (70) should still
+      // beat the closer-but-weaker one (45) because p90 preserves their
+      // coefficient contrast.
+      const moderateOrder = ranked
+        .filter((p) => p.position !== 80)
+        .map((p) => p.position);
+      expect(moderateOrder[0]).toBe(70);
+    });
+
+    it("neighborhood parameter scales the proximity weight", () => {
+      const positions = [mk(60, 0.9), mk(200, 2.0)];
+      const cursor = 50;
+      // Small neighborhood: distance dominates → strong-but-far still loses.
+      const small = rankByProximityAndSignificance(positions, cursor, 10, 10);
+      expect(small[0].position).toBe(60);
+      // Large neighborhood: significance gets room to matter → strong wins.
+      const large = rankByProximityAndSignificance(positions, cursor, 10, 1000);
+      expect(large[0].position).toBe(200);
+    });
+
+    it("no longer collapses to pure distance sort (regression for R1.6)", () => {
+      // Pre-fix formula was dist*0.5 - |coef|*2. With |coef| < 1, distance
+      // term dominated. Construct a case where the pure-distance ordering
+      // would put a weak peak above a strong distant one.
+      const positions = [
+        mk(51, 0.05), // 1 line away, coef 0.05
+        mk(52, 0.06), // 2 lines away, coef 0.06
+        mk(80, 1.5),  // 30 lines away, coef 1.5
+      ];
+      const ranked = rankByProximityAndSignificance(positions, 50, 3);
+      // Strong peak should be first
+      expect(ranked[0].position).toBe(80);
+    });
+  });
+
+  describe("R1.5: stale-context refresh on read", () => {
+    it("getProactiveContext recomputes when fresh ctx differs from cached", () => {
+      const ctx1 = new FileContext("test.py", samplePython);
+      manager.updateCursor(ctx1, "test.py", 10, 4);
+      const stale = manager.getProactiveContext("test.py");
+      expect(stale).not.toBeNull();
+
+      // File changed on disk — a fresh ctx is computed elsewhere (e.g. via
+      // mtime-aware file cache). Caller passes it in to keep the cursor's
+      // proactiveContext in sync without requiring an update_cursor_position
+      // round-trip.
+      const newContent = samplePython +
+        "\n\nclass FreshOne:\n    def fresh(self):\n        pass\n";
+      const ctx2 = new FileContext("test.py", newContent);
+
+      const refreshed = manager.getProactiveContext("test.py", ctx2);
+      expect(refreshed).not.toBeNull();
+      // Coarse band of refreshed ctx should reflect the new class
+      const merged =
+        refreshed!.bands.coarse.content +
+        refreshed!.bands.medium.content +
+        refreshed!.bands.fine.content;
+      expect(merged).toContain("FreshOne");
+    });
+
+    it("getProactiveContext returns cached when fresh ctx is identical", () => {
+      const ctx = new FileContext("test.py", samplePython);
+      manager.updateCursor(ctx, "test.py", 10, 4);
+      const first = manager.getProactiveContext("test.py");
+      const second = manager.getProactiveContext("test.py", ctx);
+      // Same object reference — no recompute
+      expect(second).toBe(first);
+    });
+
+    it("clamps cursor line when fresh ctx is much shorter", () => {
+      const ctx1 = new FileContext("test.py", samplePython);
+      manager.updateCursor(ctx1, "test.py", 25, 0); // near end of original
+
+      // Drastically shrunken file — only 3 lines
+      const tiny = new FileContext("test.py", "a = 1\nb = 2\nc = 3\n");
+      const refreshed = manager.getProactiveContext("test.py", tiny);
+      expect(refreshed).not.toBeNull();
+      // Center should be clamped into the new file's range
+      expect(refreshed!.center).toBeLessThan(tiny.lineCount);
+    });
+
+    it("getCursorImportantPositions uses fresh ctx when provided", () => {
+      const ctx1 = new FileContext("test.py", samplePython);
+      manager.updateCursor(ctx1, "test.py", 10, 4);
+
+      const newContent = samplePython +
+        "\n\nclass FreshTwo:\n    def fresh(self):\n        pass\n";
+      const ctx2 = new FileContext("test.py", newContent);
+
+      const stalePositions = manager.getCursorImportantPositions("test.py", 50);
+      const freshPositions = manager.getCursorImportantPositions("test.py", 50, ctx2);
+
+      expect(stalePositions).not.toBeNull();
+      expect(freshPositions).not.toBeNull();
+      // Fresh context with extra class should expose more peaks
+      expect(freshPositions!.length).toBeGreaterThan(stalePositions!.length);
+    });
   });
 });

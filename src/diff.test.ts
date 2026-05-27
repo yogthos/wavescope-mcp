@@ -1,10 +1,12 @@
 import { describe, it, expect } from "vitest";
-import { diffPeaks, diffFileContext, FileDiffResult } from "./diff.js";
-import { readFileAtRef, findGitRoot } from "./git.js";
+import { diffPeaks, diffFileContext, diffFileAtRefs, FileDiffResult } from "./diff.js";
+import { readFileAtRef, tryReadFileAtRef, findGitRoot } from "./git.js";
 import { FileContext } from "./context.js";
 import { Peak } from "./wavelet.js";
 import { execFileSync } from "node:child_process";
-import { resolve, dirname } from "node:path";
+import { mkdtempSync, writeFileSync, rmSync, unlinkSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { resolve, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -153,6 +155,32 @@ describe("diffPeaks", () => {
     expect(diff.summary.removed).toBe(0);
   });
 
+  it("breaks distance ties by coefficient closeness, not input order (R3.4)", () => {
+    // both before peaks are exactly 2 lines away from after[12]
+    // before[10] has coef 0.5, before[14] has coef 0.9
+    // after[12] has coef 0.9 → before[14] is the better match by coef
+    const before = [makePeak(10, 0.5), makePeak(14, 0.9)];
+    const after = [makePeak(12, 0.9)];
+    const diff = diffPeaks(before, after, 3);
+
+    const shifted = diff.changes.find((c) => c.kind === "shifted");
+    expect(shifted).toBeDefined();
+    expect(shifted!.before!.position).toBe(14);
+
+    const removed = diff.changes.find((c) => c.kind === "removed");
+    expect(removed).toBeDefined();
+    expect(removed!.before!.position).toBe(10);
+  });
+
+  it("tiebreak is stable when before is reordered", () => {
+    const after = [makePeak(12, 0.9)];
+    const a = diffPeaks([makePeak(10, 0.5), makePeak(14, 0.9)], after, 3);
+    const b = diffPeaks([makePeak(14, 0.9), makePeak(10, 0.5)], after, 3);
+    // The "winning" before should be 14 in both orderings
+    expect(a.changes.find((c) => c.kind === "shifted")!.before!.position).toBe(14);
+    expect(b.changes.find((c) => c.kind === "shifted")!.before!.position).toBe(14);
+  });
+
   it("matches closest peak when multiple candidates exist within window", () => {
     const before = [makePeak(10, 0.9), makePeak(15, 0.3)];
     const after = [makePeak(12, 0.85)];
@@ -264,6 +292,90 @@ describe("integration: full composition path", () => {
       if (c.kind !== "added") expect(c.before).not.toBeNull();
       if (c.kind !== "removed") expect(c.after).not.toBeNull();
     }
+  });
+
+  it("tryReadFileAtRef rejects paths outside the repository with a recognizable message", async () => {
+    // /etc/passwd is a real path outside any normal repo
+    await expect(
+      tryReadFileAtRef(repoRoot, "/etc/passwd", "HEAD"),
+    ).rejects.toThrow(/outside the repository/);
+  });
+
+  it("tryReadFileAtRef returns null when file does not exist at ref", async () => {
+    // streaming.ts was added in HEAD~2 — at HEAD~3 it didn't exist
+    const result = await tryReadFileAtRef(repoRoot, resolve(repoRoot, "src/streaming.ts"), "HEAD~3");
+    expect(result).toBeNull();
+  });
+
+  it("tryReadFileAtRef returns null for path that never existed at ref", async () => {
+    const result = await tryReadFileAtRef(
+      repoRoot,
+      resolve(repoRoot, "src/no_such_file.ts"),
+      "HEAD",
+    );
+    expect(result).toBeNull();
+  });
+
+  it("tryReadFileAtRef throws for invalid ref", async () => {
+    await expect(
+      tryReadFileAtRef(repoRoot, resolve(repoRoot, "src/index.ts"), "BOGUS_REF_DOES_NOT_EXIST"),
+    ).rejects.toThrow();
+  });
+
+  it("tryReadFileAtRef returns content for valid ref + file", async () => {
+    const result = await tryReadFileAtRef(repoRoot, resolve(repoRoot, "src/index.ts"), "HEAD");
+    expect(result).toBeTypeOf("string");
+    expect(result!.length).toBeGreaterThan(0);
+  });
+
+  it("diffFileAtRefs handles file that does not exist at base (treats base as empty)", async () => {
+    // streaming.ts present at HEAD, missing at HEAD~3
+    const filePath = resolve(repoRoot, "src/streaming.ts");
+    const result = await diffFileAtRefs(filePath, "HEAD~3", "HEAD", {
+      minCoefficient: 0.3,
+      limit: 100,
+      window: 2,
+    });
+    expect(result.beforeLineCount).toBe(0);
+    expect(result.afterLineCount).toBeGreaterThan(0);
+    expect(result.diff.summary.removed).toBe(0);
+    expect(result.diff.summary.added).toBeGreaterThan(0);
+  });
+
+  it("diffFileAtRefs handles file deleted in working tree (treats target as empty)", async () => {
+    // Create a temp git repo with a committed file, then delete the file on disk
+    const tmp = mkdtempSync(join(tmpdir(), "wavescope-diff-"));
+    try {
+      execFileSync("git", ["init", "-q"], { cwd: tmp });
+      execFileSync("git", ["config", "user.email", "test@test"], { cwd: tmp });
+      execFileSync("git", ["config", "user.name", "test"], { cwd: tmp });
+      const file = join(tmp, "foo.ts");
+      writeFileSync(file, "export class Foo {\n  bar() {}\n  baz() {}\n}\n");
+      execFileSync("git", ["add", "."], { cwd: tmp });
+      execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: tmp });
+      unlinkSync(file);
+      expect(existsSync(file)).toBe(false);
+
+      const result = await diffFileAtRefs(file, "HEAD", undefined, {
+        minCoefficient: 0.3,
+        limit: 100,
+        window: 2,
+      });
+      expect(result.beforeLineCount).toBeGreaterThan(0);
+      expect(result.afterLineCount).toBe(0);
+      expect(result.diff.summary.added).toBe(0);
+      // The committed 4-line class produces at least one peak above 0.3
+      expect(result.diff.summary.removed).toBeGreaterThanOrEqual(1);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("diffFileAtRefs throws when file is missing on both sides", async () => {
+    const file = resolve(repoRoot, "src/never_existed_anywhere.ts");
+    await expect(
+      diffFileAtRefs(file, "HEAD", "HEAD", { minCoefficient: 0.3, limit: 100, window: 2 }),
+    ).rejects.toThrow();
   });
 
   it("returns all-unchanged for identical revisions", async () => {

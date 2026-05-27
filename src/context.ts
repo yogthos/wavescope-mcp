@@ -40,6 +40,10 @@ export interface WaveletCoefficientsResult {
   requestedScale: number;
   /** Raw coefficient slice. */
   coefficients: number[];
+  /** True when the requested range was clamped to the valid coefficient bounds. */
+  clamped: boolean;
+  /** Original {start, end} requested by caller, present only when clamped. */
+  clampedFrom?: { start: number; end: number };
 }
 
 /** Band scale ranges used by buildMediumBand / buildCoarseBand. */
@@ -235,9 +239,13 @@ export class FileContext {
     scale?: number,
   ): string {
     if (this.lines.length === 0) return "";
-    let s = Math.max(0, start);
-    let e = Math.min(this.lines.length - 1, end);
-    if (s > e) [s, e] = [e, s];
+    const maxIdx = this.lines.length - 1;
+    const lo = Math.min(start, end);
+    const hi = Math.max(start, end);
+    // Fully out of range → empty, don't fabricate content from clamped boundary.
+    if (lo > maxIdx || hi < 0) return "";
+    const s = Math.max(0, lo);
+    const e = Math.min(maxIdx, hi);
 
     const allPeaks = this.getAllPeaks();
 
@@ -266,25 +274,50 @@ export class FileContext {
     scale: number,
   ): WaveletCoefficientsResult {
     if (this.coefficients.coefficients.length === 0) {
-      return { scale, requestedScale: scale, coefficients: [] };
+      return {
+        scale,
+        requestedScale: scale,
+        coefficients: [],
+        clamped: false,
+      };
     }
     const resolvedScale = this.findClosestScale(scale);
     const scaleIdx = this.coefficients.scales.indexOf(resolvedScale);
 
     const coeffs = this.coefficients.coefficients[scaleIdx];
     if (!coeffs) {
-      return { scale: resolvedScale, requestedScale: scale, coefficients: [] };
+      return {
+        scale: resolvedScale,
+        requestedScale: scale,
+        coefficients: [],
+        clamped: false,
+      };
     }
-    let s = Math.max(0, start);
-    let e = Math.min(coeffs.length - 1, end);
-
-    if (s > e) [s, e] = [e, s];
-
-    return {
+    const maxIdx = coeffs.length - 1;
+    const lo = Math.min(start, end);
+    const hi = Math.max(start, end);
+    // Fully out of range — return empty, signal clamping rather than slice
+    // to the boundary and return a misleading single coefficient.
+    if (lo > maxIdx || hi < 0) {
+      return {
+        scale: resolvedScale,
+        requestedScale: scale,
+        coefficients: [],
+        clamped: true,
+        clampedFrom: { start, end },
+      };
+    }
+    const s = Math.max(0, lo);
+    const e = Math.min(maxIdx, hi);
+    const clamped = s !== start || e !== end;
+    const result: WaveletCoefficientsResult = {
       scale: resolvedScale,
       requestedScale: scale,
       coefficients: coeffs.slice(s, e + 1),
+      clamped,
     };
+    if (clamped) result.clampedFrom = { start, end };
+    return result;
   }
 
   // ─── private helpers ──────────────────────────────────────

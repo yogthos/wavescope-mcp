@@ -250,6 +250,83 @@ describe("FileContext", () => {
     });
   });
 
+  describe("getSummaryAtScale — out-of-range handling", () => {
+    it("does not crash when start is past end of file", () => {
+      expect(() =>
+        ctx.getSummaryAtScale(ctx.lineCount + 1000, ctx.lineCount + 2000),
+      ).not.toThrow();
+      const result = ctx.getSummaryAtScale(
+        ctx.lineCount + 1000,
+        ctx.lineCount + 2000,
+      );
+      expect(result).toBe("");
+    });
+
+    it("does not crash when end is negative", () => {
+      expect(() => ctx.getSummaryAtScale(-100, -10)).not.toThrow();
+      expect(ctx.getSummaryAtScale(-100, -10)).toBe("");
+    });
+
+    it("clamps when one bound is out of range but other is valid", () => {
+      const result = ctx.getSummaryAtScale(0, ctx.lineCount + 1000);
+      expect(typeof result).toBe("string");
+      expect(result.length).toBeGreaterThan(0);
+    });
+
+    it("recovers a valid window from a swapped-negative pair", () => {
+      // (start=10, end=-5) overlaps lines 0..10 once normalized — do not drop.
+      const result = ctx.getSummaryAtScale(10, -5);
+      expect(typeof result).toBe("string");
+      expect(result.length).toBeGreaterThan(0);
+    });
+
+    it("returns empty for start exactly past end of file", () => {
+      expect(ctx.getSummaryAtScale(ctx.lineCount, ctx.lineCount)).toBe("");
+    });
+  });
+
+  describe("getWaveletCoefficients — out-of-range handling", () => {
+    it("does not silently return last coefficient when start is past end of file", () => {
+      const result = ctx.getWaveletCoefficients(
+        ctx.lineCount + 1000,
+        ctx.lineCount + 2000,
+        2,
+      );
+      // Should be empty rather than returning a misleading single coefficient
+      expect(result.coefficients).toEqual([]);
+      expect(result.clamped).toBe(true);
+    });
+
+    it("flags clamping when bounds are partially out of range", () => {
+      const result = ctx.getWaveletCoefficients(
+        -5,
+        ctx.lineCount + 10,
+        2,
+      );
+      expect(result.coefficients.length).toBe(ctx.lineCount);
+      expect(result.clamped).toBe(true);
+      expect(result.clampedFrom).toEqual({ start: -5, end: ctx.lineCount + 10 });
+    });
+
+    it("does not flag clamping when bounds are in range", () => {
+      const result = ctx.getWaveletCoefficients(0, 9, 2);
+      expect(result.clamped).toBe(false);
+      expect(result.clampedFrom).toBeUndefined();
+    });
+
+    it("does not crash and reports clamping when end is negative", () => {
+      const result = ctx.getWaveletCoefficients(-100, -10, 2);
+      expect(result.coefficients).toEqual([]);
+      expect(result.clamped).toBe(true);
+    });
+
+    it("recovers a valid window from a swapped-negative pair", () => {
+      const result = ctx.getWaveletCoefficients(10, -5, 2);
+      expect(result.coefficients.length).toBe(11);
+      expect(result.clamped).toBe(true);
+    });
+  });
+
   describe("queryWaveletContext — clamping disclosure", () => {
     it("returns clamped=true and clampedFrom when center is beyond file", () => {
       const result = ctx.queryWaveletContext(ctx.lineCount + 100, 200);

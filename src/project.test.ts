@@ -169,6 +169,98 @@ describe("ProjectIndex", () => {
     const project = await ProjectIndex.load(testDir);
     expect(project.listFiles().length).toBeGreaterThanOrEqual(4);
   });
+
+  it("dedups regular-file symlinks (R4.2)", async () => {
+    const dir = join(tmpdir(), `wavescope-symlink-dedup-${Date.now()}`);
+    await mkdir(dir, { recursive: true });
+    try {
+      const real = join(dir, "real.ts");
+      await writeFile(real, "export class Real {}\n");
+      // Symlink in the same directory pointing at real.ts
+      await symlink(real, join(dir, "alias.ts"));
+
+      const project = await ProjectIndex.load(dir);
+      const paths = project.listFiles();
+      // Both names show up only once each; the underlying realpath is
+      // visited once so only one ends up in the index.
+      const realCount = paths.filter((p) => p === "real.ts" || p === "alias.ts").length;
+      expect(realCount).toBe(1);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("ProjectIndex.load throws AbortError when signal is aborted upfront (R3.3)", async () => {
+    const dir = join(tmpdir(), `wavescope-abort-${Date.now()}`);
+    await mkdir(dir, { recursive: true });
+    try {
+      // Populate with a handful of files so the walk has work to do
+      for (let i = 0; i < 5; i++) {
+        await writeFile(join(dir, `f${i}.ts`), `export const x${i} = ${i};\n`);
+      }
+      const controller = new AbortController();
+      controller.abort();
+      await expect(
+        ProjectIndex.load(dir, undefined, controller.signal),
+      ).rejects.toMatchObject({ name: "AbortError" });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("ProjectIndex.load throws AbortError when signal aborts mid-flight (R3.3)", async () => {
+    const dir = join(tmpdir(), `wavescope-abort-mid-${Date.now()}`);
+    await mkdir(dir, { recursive: true });
+    try {
+      // Populate enough files that the walk has multiple iterations
+      for (let i = 0; i < 50; i++) {
+        await writeFile(join(dir, `f${i}.ts`), `export const x${i} = ${i};\n`);
+      }
+      const controller = new AbortController();
+      const loadPromise = ProjectIndex.load(dir, undefined, controller.signal);
+      // Abort on the next microtask so at least one walk step ran
+      queueMicrotask(() => controller.abort());
+      await expect(loadPromise).rejects.toMatchObject({ name: "AbortError" });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("indexes filename-recognized files like Rakefile and Gemfile (R2.2)", async () => {
+    const dir = join(tmpdir(), `wavescope-filenames-${Date.now()}`);
+    await mkdir(dir, { recursive: true });
+    try {
+      await writeFile(
+        join(dir, "Rakefile"),
+        `task :default => [:test]\n\ntask :test do\n  sh "ruby test/test_all.rb"\nend\n`,
+      );
+      await writeFile(
+        join(dir, "Gemfile"),
+        `source 'https://rubygems.org'\n\ngem 'rails', '~> 7.0'\ngem 'rspec'\n`,
+      );
+      // Also include a plain code file to confirm the regular gate still works
+      await writeFile(
+        join(dir, "main.rb"),
+        `class Main\n  def run\n  end\nend\n`,
+      );
+
+      // Same filename in a subdirectory should also be picked up
+      await mkdir(join(dir, "tasks"), { recursive: true });
+      await writeFile(
+        join(dir, "tasks", "Rakefile"),
+        `task :sub do\n  puts "in subtask"\nend\n`,
+      );
+
+      const project = await ProjectIndex.load(dir);
+      const paths = project.listFiles();
+      expect(paths).toContain("Rakefile");
+      expect(paths).toContain("Gemfile");
+      expect(paths).toContain("main.rb");
+      expect(paths).toContain("tasks/Rakefile");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("ProjectIndex — .gitignore", () => {

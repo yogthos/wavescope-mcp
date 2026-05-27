@@ -173,16 +173,49 @@ describe("StreamManager", () => {
     const result1 = manager.poll(id);
     if (!result1 || "error" in result1) throw new Error("expected batch");
     expect(result1.peaks[0].position).toBe(10);
+    // Errored stream must not signal complete while undelivered work remains
+    expect(result1.complete).toBe(false);
+    expect(result1.more).toBe(true);
 
     // Second poll delivers next buffered batch
     const result2 = manager.poll(id);
     if (!result2 || "error" in result2) throw new Error("expected batch");
     expect(result2.peaks[0].position).toBe(20);
+    // Buffer drained but error still undelivered — must keep consumer polling
+    expect(result2.complete).toBe(false);
+    expect(result2.more).toBe(true);
 
-    // Third poll — buffer drained, now surface the error
+    // Third poll — now surface the error
     const result3 = manager.poll(id);
     expect(result3).toHaveProperty("error", "disk full");
     expect(result3).toHaveProperty("complete", true);
+  });
+
+  it("markErrored before any batches → poll returns error immediately", () => {
+    const id = manager.createStream();
+    manager.markErrored(id, "boom");
+
+    const result = manager.poll(id);
+    expect(result).toHaveProperty("error", "boom");
+    expect(result).toHaveProperty("complete", true);
+  });
+
+  it("error surfaces when markErrored fires after isLast batch already buffered", () => {
+    const id = manager.createStream();
+    manager.appendBatch(id, [makePeak(10, "class Foo")], true);
+    // Race: markErrored called after a "last" batch was buffered. The
+    // producer error must not be silently dropped.
+    manager.markErrored(id, "post-last failure");
+
+    const first = manager.poll(id);
+    if (!first || "error" in first) throw new Error("expected batch");
+    expect(first.peaks[0].position).toBe(10);
+    // Don't claim complete while error is still queued
+    expect(first.complete).toBe(false);
+
+    const second = manager.poll(id);
+    expect(second).toHaveProperty("error", "post-last failure");
+    expect(second).toHaveProperty("complete", true);
   });
 
   it("peek does not refresh lastAccess", () => {
@@ -215,6 +248,45 @@ describe("StreamManager", () => {
     expect(second.peaks).toEqual([]);
     expect(second.more).toBe(true); // producer still running
     expect(second.complete).toBe(false);
+  });
+
+  it("close() fires the registered AbortController (R3.3)", () => {
+    const id = manager.createStream();
+    const controller = new AbortController();
+    manager.registerAborter(id, controller);
+    expect(controller.signal.aborted).toBe(false);
+    manager.close(id);
+    expect(controller.signal.aborted).toBe(true);
+  });
+
+  it("registerAborter on already-closed stream aborts immediately (R3.3)", () => {
+    const id = manager.createStream();
+    manager.close(id);
+    const controller = new AbortController();
+    manager.registerAborter(id, controller);
+    expect(controller.signal.aborted).toBe(true);
+  });
+
+  it("evictExpired fires aborters for evicted streams (R3.3)", () => {
+    const id = manager.createStream();
+    const controller = new AbortController();
+    manager.registerAborter(id, controller);
+    const state = manager.peek(id)!;
+    state.lastAccess = Date.now() - 20_000;
+    manager.evictExpired(Date.now());
+    expect(controller.signal.aborted).toBe(true);
+  });
+
+  it("shutdown fires all aborters (R3.3)", () => {
+    const id1 = manager.createStream();
+    const id2 = manager.createStream();
+    const c1 = new AbortController();
+    const c2 = new AbortController();
+    manager.registerAborter(id1, c1);
+    manager.registerAborter(id2, c2);
+    manager.shutdown();
+    expect(c1.signal.aborted).toBe(true);
+    expect(c2.signal.aborted).toBe(true);
   });
 
   it("markErrored is a no-op on cancelled streams", () => {

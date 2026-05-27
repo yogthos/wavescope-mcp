@@ -90,8 +90,10 @@ clamped), three `fine`/`medium`/`coarse` bands, and detected wavelet peaks.
 Find structural boundaries (class/function defs, imports, etc.).
 
 - exactly one of `file` (single file path) or `directory` (project-wide search)
-- `min_coefficient` — raw wavelet coefficient threshold, 0–2 (default 0.3).
-  Same semantics in both single-file and project mode.
+- `min_coefficient` — raw wavelet coefficient threshold, 0–20 (default 0.3).
+  Same semantics in both single-file and project mode. Typical useful range
+  is 0.1–3; the upper bound is generous because CWT coefficients can exceed
+  2 at large scales.
 - `limit` — max results, 1–100 (default 20)
 
 #### `get_wavelet_coefficients`
@@ -103,7 +105,11 @@ Raw wavelet coefficients for custom analysis.
 Returned object includes `scale` (the actual scale used) and
 `requestedScale` (the original scale you asked for) — they differ when
 the requested scale isn't in the index and the nearest available one is
-substituted.
+substituted. The result also carries `clamped` (true if the requested
+`start`/`end` were adjusted to fit the valid coefficient range) and
+`clampedFrom: {start, end}` (the original values, present only when
+`clamped` is true). A range entirely outside the file returns `coefficients: []`
+with `clamped: true` rather than fabricating a boundary value.
 
 #### `get_summary_at_scale`
 
@@ -122,7 +128,7 @@ were added, removed, shifted, or changed in magnitude.
 - `baseRef` — base git ref (e.g. `"HEAD~1"`, `"main"`, a commit SHA)
 - `targetRef` — target git ref (optional; omit to compare against the
   current working tree)
-- `minCoefficient` — minimum wavelet coefficient threshold, 0–2 (default 0.3)
+- `minCoefficient` — minimum wavelet coefficient threshold, 0–20 (default 0.3)
 - `limit` — max peaks per revision, 1–500 (default 100)
 - `window` — max line distance for matching peaks as "shifted", 1–50 (default 2).
   Higher values treat larger moves as shifts rather than remove+add.
@@ -133,7 +139,11 @@ where each change has `kind` (one of `added`, `removed`, `shifted`,
 and `after` (the new peak, null for removed). The `summary` tallies counts
 for each kind.
 
-Requires the file to be inside a git repository.
+Requires the file to be inside a git repository. A file that does not
+exist on one side (e.g. newly added so it is missing at `baseRef`, or
+deleted in the working tree when `targetRef` is omitted) is treated as
+empty — its peaks all show up as `added` or `removed`. An error is
+returned only when the file is missing on **both** sides.
 
 #### `update_cursor_position`
 
@@ -179,7 +189,7 @@ while results are computed in the background. Use `stream_poll` to fetch
 batches incrementally and `stream_close` to cancel.
 
 - `directory` — absolute path to the project directory
-- `min_coefficient` — minimum wavelet coefficient threshold, 0–2 (default 0.3)
+- `min_coefficient` — minimum wavelet coefficient threshold, 0–20 (default 0.3)
 - `limit` — maximum total results across all batches, 1–100 (default 20)
 - `batch_size` — peaks per batch, 10–500 (default 50)
 
@@ -223,14 +233,24 @@ For a manual build, run `pnpm build`.
 Python (`.py`, `.pyi`, `.pyx`), TypeScript (`.ts`, `.tsx`, `.mts`, `.cts`),
 JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`), Go, Rust, Java, Ruby (incl.
 `Rakefile`, `Gemfile`), PHP, Swift, Kotlin, Scala, Clojure (`.clj`, `.cljs`,
-`.cljc`, `.edn`). Non-recognized extensions use a minimal generic
-configuration.
+`.cljc`, `.edn`).
+
+Single-file tools (`query_wavelet_context`, `get_important_positions` with
+`file`, `get_summary_at_scale`, etc.) fall back to a minimal generic
+configuration for any extension not listed above.
+
+Project-wide indexing (`get_important_positions` with `directory`,
+`stream_start`) is restricted to the listed extensions and known filenames
+(`Rakefile`, `Gemfile`) — unknown extensions are skipped to avoid burning
+budget on `.md`/`.json`/`.csv`/etc. that have little structural signal.
 
 ## Project-wide indexing limits
 
 When `get_important_positions` is called with `directory`, the indexer:
 
-- honors a root-level `.gitignore` (plain patterns; no negations);
+- honors a root-level `.gitignore`, including `!` negation patterns
+  (last-match-wins semantics, matching git's behavior); nested `.gitignore`
+  files are not consulted;
 - skips files larger than 2 MB and binary files (NUL byte sniff in first 4 KB);
 - caps discovery at 5000 files (a `truncated` flag is set if exceeded);
 - follows symlinks once via `realpath`, refusing any that escape the project root.

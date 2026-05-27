@@ -41,6 +41,12 @@ export class StreamManager {
   private streams = new Map<string, StreamState>();
   /** Insertion-order list for LRU eviction. */
   private lruOrder: string[] = [];
+  /**
+   * Per-stream AbortController. The producer subscribes via .signal so a
+   * stream_close (or TTL/LRU eviction) can interrupt long discovery work
+   * — not just emit-loop iterations.
+   */
+  private aborters = new Map<string, AbortController>();
 
   constructor(
     readonly ttl: number = 60_000,
@@ -108,8 +114,10 @@ export class StreamManager {
   }
 
   /**
-   * Mark a stream as errored without closing it.
-   * Consumer sees the error on next poll.
+   * Mark a stream as errored without closing it. Consumer sees the error
+   * on next poll, after any buffered batches drain. Overwrites a previous
+   * `complete` status — a producer that finishes the last batch and then
+   * fails during cleanup must still surface the failure to the consumer.
    */
   markErrored(id: string, error: string): void {
     const state = this.streams.get(id);
@@ -128,7 +136,7 @@ export class StreamManager {
    * Errored streams still drain their buffered batches first; the error
    * surfaces only once the consumer has caught up to the failure point.
    */
-  poll(id: string): PollResult | { error: string; complete: true } | null {
+  poll(id: string): PollResult | { peaks: []; error: string; complete: true } | null {
     const state = this.streams.get(id);
     if (!state) return null;
 
@@ -139,15 +147,20 @@ export class StreamManager {
       const peaks = state.batches[state.cursor];
       state.cursor++;
       const drained = state.cursor >= state.batches.length;
+      const isErrored = state.status === "errored";
+      // If errored, never claim complete on a batch — the error itself
+      // still needs to be delivered on a follow-up poll. Otherwise a
+      // consumer that stops on `complete:true` would silently lose the
+      // failure signal.
       return {
         peaks,
-        more: !drained || !state.complete,
-        complete: state.complete && drained,
+        more: isErrored ? true : !drained || !state.complete,
+        complete: !isErrored && state.complete && drained,
       };
     }
 
     if (state.status === "errored") {
-      return { error: state.error ?? "Stream error", complete: true };
+      return { peaks: [], error: state.error ?? "Stream error", complete: true };
     }
 
     return {
@@ -157,9 +170,36 @@ export class StreamManager {
     };
   }
 
+  /**
+   * Register an AbortController whose `.abort()` will fire when this
+   * stream is closed, evicted, or shut down. Producer attaches its own
+   * controller and threads its signal into long-running work.
+   */
+  registerAborter(id: string, controller: AbortController): void {
+    if (!this.streams.has(id)) {
+      // Stream already gone — abort immediately so producer doesn't waste work.
+      controller.abort();
+      return;
+    }
+    this.aborters.set(id, controller);
+  }
+
+  private fireAborter(id: string): void {
+    const c = this.aborters.get(id);
+    if (c) {
+      this.aborters.delete(id);
+      try {
+        c.abort();
+      } catch {
+        // AbortController.abort() never throws in spec, but guard anyway
+      }
+    }
+  }
+
   /** Close and remove a stream (also signals cancellation to producers). */
   close(id: string): void {
     this.streams.delete(id);
+    this.fireAborter(id);
     this.lruOrder = this.lruOrder.filter((x) => x !== id);
   }
 
@@ -169,6 +209,7 @@ export class StreamManager {
     for (const [id, state] of this.streams) {
       if (now - state.lastAccess >= this.ttl) {
         this.streams.delete(id);
+        this.fireAborter(id);
         this.lruOrder = this.lruOrder.filter((x) => x !== id);
         count++;
       }
@@ -178,6 +219,7 @@ export class StreamManager {
 
   /** Remove all streams. */
   shutdown(): void {
+    for (const id of this.streams.keys()) this.fireAborter(id);
     this.streams.clear();
     this.lruOrder = [];
   }
@@ -195,6 +237,7 @@ export class StreamManager {
     while (this.lruOrder.length > this.maxStreams) {
       const oldest = this.lruOrder.shift()!;
       this.streams.delete(oldest);
+      this.fireAborter(oldest);
     }
   }
 }

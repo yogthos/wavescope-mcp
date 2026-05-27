@@ -2,6 +2,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { isAbsolute, resolve, relative } from "node:path";
+import { stat as fsStat } from "node:fs/promises";
 import { z } from "zod";
 import { FileCache } from "./file-cache.js";
 import {
@@ -10,9 +11,8 @@ import {
   evictFractionProjects,
 } from "./project.js";
 import { CursorManager } from "./cursor.js";
-import { FileContext, ImportantPosition } from "./context.js";
-import { diffFileContext } from "./diff.js";
-import { readFileAtRef, findGitRoot } from "./git.js";
+import { ImportantPosition } from "./context.js";
+import { diffFileAtRefs, DiffFileMissingError } from "./diff.js";
 import { StreamManager } from "./streaming.js";
 
 // ─── Shared file cache ────────────────────────────────────────
@@ -26,7 +26,13 @@ const streamManager = new StreamManager(60_000, 20);
 
 class ToolError extends Error {}
 
-function toolErrorResponse(message: string) {
+export interface ToolResponse {
+  isError?: boolean;
+  content: { type: "text"; text: string }[];
+  [key: string]: unknown;
+}
+
+function toolErrorResponse(message: string): ToolResponse {
   return {
     isError: true,
     content: [{ type: "text" as const, text: message }],
@@ -37,7 +43,11 @@ function curateFsError(err: unknown): string {
   const e = err as NodeJS.ErrnoException;
   if (e?.code === "ENOENT") return "File not found";
   if (e?.code === "EACCES") return "Permission denied";
+  if (e?.code === "EPERM") return "Permission denied";
   if (e?.code === "EISDIR") return "Expected a file, got a directory";
+  if (e?.code === "ENOTDIR") return "Expected a directory, got a file";
+  if (e?.code === "EMFILE" || e?.code === "ENFILE") return "Too many open files";
+  if (e?.code === "ELOOP") return "Symlink loop detected";
   if (err instanceof ToolError) return err.message;
   console.error("[wavescope] Internal error:", err);
   return "Internal error";
@@ -112,8 +122,10 @@ server.registerTool(
       directory: z.string().optional().describe(
         "Absolute path to a project directory. Mutually exclusive with 'file'.",
       ),
-      min_coefficient: z.number().min(0).max(2).default(0.3).describe(
-        "Minimum wavelet coefficient threshold (0-2). Lower = more results. Default 0.3.",
+      min_coefficient: z.number().min(0).max(20).default(0.3).describe(
+        "Minimum wavelet coefficient threshold. Lower = more results. " +
+        "CWT coefficients commonly land in 0–3 for typical files but can " +
+        "exceed 2 at large scales, so the upper bound is generous (20). Default 0.3.",
       ),
       limit: z.number().int().min(1).max(100).default(20).describe(
         "Maximum number of positions to return. 1-100. Default 20.",
@@ -246,8 +258,9 @@ server.registerTool(
       targetRef: z.string().optional().describe(
         "Target git ref. Omit to compare against the current working tree.",
       ),
-      minCoefficient: z.number().min(0).max(2).default(0.3).describe(
-        "Minimum wavelet coefficient threshold for peak detection. Lower = more peaks. Default 0.3.",
+      minCoefficient: z.number().min(0).max(20).default(0.3).describe(
+        "Minimum wavelet coefficient threshold for peak detection. Lower = more peaks. " +
+        "Upper bound is generous (20) because CWT coefficients can exceed 2 at large scales. Default 0.3.",
       ),
       limit: z.number().int().min(1).max(500).default(100).describe(
         "Maximum number of peaks to detect per revision. Default 100.",
@@ -258,70 +271,51 @@ server.registerTool(
       ),
     },
   },
-  ({ file, baseRef, targetRef, minCoefficient, limit, window }) =>
-    track(async () => {
-      try {
-        requireAbsoluteFile(file);
-        const absFile = resolve(file);
-
-        let repoRoot: string;
-        try {
-          repoRoot = findGitRoot(absFile);
-        } catch {
-          throw new ToolError("File is not in a git repository");
-        }
-
-        let baseContent: string;
-        try {
-          baseContent = await readFileAtRef(repoRoot, absFile, baseRef);
-        } catch (err) {
-          throw new ToolError(
-            `Cannot read file at ref "${baseRef}": ${(err as Error).message}`,
-          );
-        }
-
-        let targetCtx: FileContext;
-        if (targetRef) {
-          try {
-            const content = await readFileAtRef(repoRoot, absFile, targetRef);
-            targetCtx = new FileContext(absFile, content);
-          } catch (err) {
-            throw new ToolError(
-              `Cannot read file at ref "${targetRef}": ${(err as Error).message}`,
-            );
-          }
-        } else {
-          targetCtx = await getFileContext(absFile);
-        }
-
-        const baseCtx = new FileContext(absFile, baseContent);
-
-        const basePeaks = baseCtx.getImportantPositions(
-          minCoefficient,
-          limit,
-        );
-
-        const targetPeaks = targetCtx.getImportantPositions(
-          minCoefficient,
-          limit,
-        );
-
-        const result = diffFileContext(
-          basePeaks,
-          targetPeaks,
-          baseCtx.lineCount,
-          targetCtx.lineCount,
-          window,
-        );
-
-        return {
-          content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
-        };
-      } catch (err) {
-        return toolErrorResponse(curateFsError(err));
-      }
-    }),
+  (input) => track(() => handleDiffWaveletContext(input)),
 );
+
+interface DiffWaveletContextInput {
+  file: string;
+  baseRef: string;
+  targetRef?: string;
+  minCoefficient: number;
+  limit: number;
+  window: number;
+}
+
+export async function handleDiffWaveletContext(
+  input: DiffWaveletContextInput,
+): Promise<ToolResponse> {
+  const { file, baseRef, targetRef, minCoefficient, limit, window } = input;
+  try {
+    requireAbsoluteFile(file);
+    const absFile = resolve(file);
+
+    const result = await diffFileAtRefs(absFile, baseRef, targetRef, {
+      minCoefficient,
+      limit,
+      window,
+      getWorkingTreeContext: getFileContext,
+    });
+
+    return {
+      content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+    };
+  } catch (err) {
+    if (err instanceof DiffFileMissingError) {
+      return toolErrorResponse(err.message);
+    }
+    if (err instanceof Error) {
+      if (/Not a git repository/.test(err.message)) {
+        return toolErrorResponse("File is not in a git repository");
+      }
+      if (/is outside the repository/.test(err.message)) {
+        return toolErrorResponse("File is outside the git repository");
+      }
+    }
+    return toolErrorResponse(curateFsError(err));
+  }
+}
 
 // ─── update_cursor_position ────────────────────────────────
 
@@ -375,22 +369,39 @@ server.registerTool(
       file: z.string().describe("Absolute path to the file"),
     },
   },
-  ({ file }) =>
-    track(async () => {
-      try {
-        requireAbsoluteFile(file);
-        const context = cursorManager.getProactiveContext(file);
-        if (!context) {
-          throw new ToolError("No cursor registered for this file");
-        }
-        return {
-          content: [{ type: "text" as const, text: JSON.stringify(context, null, 2) }],
-        };
-      } catch (err) {
-        return toolErrorResponse(curateFsError(err));
-      }
-    }),
+  (input) => track(() => handleGetCursorContext(input)),
 );
+
+export async function handleGetCursorContext(
+  input: { file: string },
+): Promise<ToolResponse> {
+  const { file } = input;
+  try {
+    requireAbsoluteFile(file);
+    // Pull a mtime-validated FileContext so a disk change since the
+    // last update_cursor_position triggers a recompute instead of
+    // serving a stale proactiveContext.
+    let freshCtx;
+    try {
+      freshCtx = await getFileContext(file);
+    } catch (err) {
+      // Tolerate transient file-system blips (deleted-then-recreated
+      // on atomic save, brief permission flap). Anything else should
+      // propagate so the editor sees real failures.
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code !== "ENOENT" && code !== "EACCES") throw err;
+    }
+    const context = cursorManager.getProactiveContext(file, freshCtx);
+    if (!context) {
+      throw new ToolError("No cursor registered for this file");
+    }
+    return {
+      content: [{ type: "text" as const, text: JSON.stringify(context, null, 2) }],
+    };
+  } catch (err) {
+    return toolErrorResponse(curateFsError(err));
+  }
+}
 
 // ─── get_cursor_important_positions ─────────────────────────
 
@@ -408,22 +419,37 @@ server.registerTool(
       ),
     },
   },
-  ({ file, limit }) =>
-    track(async () => {
-      try {
-        requireAbsoluteFile(file);
-        const positions = cursorManager.getCursorImportantPositions(file, limit);
-        if (!positions) {
-          throw new ToolError("No cursor registered for this file");
-        }
-        return {
-          content: [{ type: "text" as const, text: JSON.stringify(positions, null, 2) }],
-        };
-      } catch (err) {
-        return toolErrorResponse(curateFsError(err));
-      }
-    }),
+  (input) => track(() => handleGetCursorImportantPositions(input)),
 );
+
+export async function handleGetCursorImportantPositions(
+  input: { file: string; limit: number },
+): Promise<ToolResponse> {
+  const { file, limit } = input;
+  try {
+    requireAbsoluteFile(file);
+    let freshCtx;
+    try {
+      freshCtx = await getFileContext(file);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code !== "ENOENT" && code !== "EACCES") throw err;
+    }
+    const positions = cursorManager.getCursorImportantPositions(
+      file,
+      limit,
+      freshCtx,
+    );
+    if (!positions) {
+      throw new ToolError("No cursor registered for this file");
+    }
+    return {
+      content: [{ type: "text" as const, text: JSON.stringify(positions, null, 2) }],
+    };
+  } catch (err) {
+    return toolErrorResponse(curateFsError(err));
+  }
+}
 
 // ─── stream_start ──────────────────────────────────────────
 
@@ -436,8 +462,8 @@ server.registerTool(
       "Use this for long-running project-wide queries.",
     inputSchema: {
       directory: z.string().describe("Absolute path to the project directory"),
-      min_coefficient: z.number().min(0).max(2).default(0.3).describe(
-        "Minimum wavelet coefficient threshold (0-2). Default 0.3.",
+      min_coefficient: z.number().min(0).max(20).default(0.3).describe(
+        "Minimum wavelet coefficient threshold. Default 0.3.",
       ),
       limit: z.number().int().min(1).max(100).default(20).describe(
         "Maximum total results across all batches. Default 20.",
@@ -447,20 +473,51 @@ server.registerTool(
       ),
     },
   },
-  ({ directory, min_coefficient, limit, batch_size }) =>
-    track(async () => {
-      try {
-        if (!isAbsolute(directory)) {
-          throw new ToolError("`directory` must be an absolute path");
-        }
-        const root = resolve(directory);
-        const streamId = streamManager.createStream();
+  (input) => track(() => handleStreamStart(input)),
+);
+
+export async function handleStreamStart(
+  input: {
+    directory: string;
+    min_coefficient: number;
+    limit: number;
+    batch_size: number;
+  },
+): Promise<ToolResponse> {
+  const { directory, min_coefficient, limit, batch_size } = input;
+  try {
+    if (!isAbsolute(directory)) {
+      throw new ToolError("`directory` must be an absolute path");
+    }
+    const root = resolve(directory);
+    // Validate the directory exists and is a directory BEFORE returning a
+    // stream_id. Otherwise the error only surfaces via the first poll,
+    // forcing the client through an extra round-trip just to learn the
+    // path was bad and leaking the raw FS-path-bearing message.
+    let dirStat;
+    try {
+      dirStat = await fsStat(root);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === "ENOENT") {
+        throw new ToolError("Directory not found");
+      }
+      throw err;
+    }
+    if (!dirStat.isDirectory()) {
+      throw new ToolError("`directory` is not a directory");
+    }
+    const streamId = streamManager.createStream();
+        // Per-stream AbortController so stream_close / TTL eviction can
+        // interrupt the discovery walk, not just the emit loop between
+        // batches.
+        const aborter = new AbortController();
+        streamManager.registerAborter(streamId, aborter);
 
         // Background producer — kept inside track() so graceful shutdown
         // waits for emission to drain, not just for the first setImmediate.
         track(async () => {
           try {
-            const project = await ProjectIndex.load(root, fileCache);
+            const project = await ProjectIndex.load(root, fileCache, aborter.signal);
             const allFiles = project.files;
 
             if (allFiles.length === 0) {
@@ -521,10 +578,12 @@ server.registerTool(
               streamManager.appendBatch(streamId, [], true);
             }
           } catch (err) {
-            streamManager.markErrored(
-              streamId,
-              (err as Error).message ?? "Unknown error during indexing",
-            );
+            // AbortError from stream_close / eviction — silent exit, the
+            // stream is already gone so there's no consumer to report to.
+            if ((err as Error)?.name === "AbortError") return;
+            // Sanitize before exposing — raw error.message can include
+            // absolute filesystem paths and Node ENOENT/EACCES details.
+            streamManager.markErrored(streamId, curateFsError(err));
           }
         }).catch(() => {
           // Defensive: track() should never reject because the inner try/catch
@@ -532,17 +591,16 @@ server.registerTool(
           // markErrored itself or future refactors.
         });
 
-        return {
-          content: [{
-            type: "text" as const,
-            text: JSON.stringify({ stream_id: streamId }),
-          }],
-        };
-      } catch (err) {
-        return toolErrorResponse(curateFsError(err));
-      }
-    }),
-);
+    return {
+      content: [{
+        type: "text" as const,
+        text: JSON.stringify({ stream_id: streamId }),
+      }],
+    };
+  } catch (err) {
+    return toolErrorResponse(curateFsError(err));
+  }
+}
 
 // ─── stream_poll ───────────────────────────────────────────
 
