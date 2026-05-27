@@ -15,6 +15,15 @@ const repoRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
   encoding: "utf-8",
 }).trim();
 
+// Resolve the parent of the commit that introduced src/streaming.ts so the
+// "file did not exist at base" tests stay correct as new commits land.
+const streamingIntroCommit = execFileSync(
+  "git",
+  ["log", "--diff-filter=A", "--follow", "--format=%H", "--", "src/streaming.ts"],
+  { cwd: repoRoot, encoding: "utf-8" },
+).trim().split("\n").pop()!;
+const refBeforeStreaming = `${streamingIntroCommit}^`;
+
 function makePeak(
   position: number,
   coefficient: number,
@@ -302,8 +311,7 @@ describe("integration: full composition path", () => {
   });
 
   it("tryReadFileAtRef returns null when file does not exist at ref", async () => {
-    // streaming.ts was added in HEAD~2 — at HEAD~3 it didn't exist
-    const result = await tryReadFileAtRef(repoRoot, resolve(repoRoot, "src/streaming.ts"), "HEAD~3");
+    const result = await tryReadFileAtRef(repoRoot, resolve(repoRoot, "src/streaming.ts"), refBeforeStreaming);
     expect(result).toBeNull();
   });
 
@@ -329,9 +337,9 @@ describe("integration: full composition path", () => {
   });
 
   it("diffFileAtRefs handles file that does not exist at base (treats base as empty)", async () => {
-    // streaming.ts present at HEAD, missing at HEAD~3
+    // streaming.ts present at HEAD, missing before its introducing commit
     const filePath = resolve(repoRoot, "src/streaming.ts");
-    const result = await diffFileAtRefs(filePath, "HEAD~3", "HEAD", {
+    const result = await diffFileAtRefs(filePath, refBeforeStreaming, "HEAD", {
       minCoefficient: 0.3,
       limit: 100,
       window: 2,
