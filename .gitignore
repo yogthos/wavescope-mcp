@@ -5,6 +5,7 @@ coverage/
 .DS_Store
 .idea/
 .vscode/
+.dirge/
 *.swp
 blog.md
 package-lock.json
