@@ -260,8 +260,11 @@ function scoreLine(
   const tokens = tokenize(codeOnly);
   for (const token of tokens) {
     if (!token) continue;
-    const kwWeight = lang.structuralKeywords[token];
-    if (kwWeight !== undefined) score += kwWeight;
+    // Use hasOwn, not a `!== undefined` check: tokens like `constructor`,
+    // `toString`, `valueOf` resolve to inherited Object.prototype functions
+    // on a plain object, which would add a function to the score → NaN.
+    if (!Object.hasOwn(lang.structuralKeywords, token)) continue;
+    score += lang.structuralKeywords[token];
   }
 
   // Decorators / annotations: line-start `@`, Rust `#[...]`, PHP 8 `#[...]`,

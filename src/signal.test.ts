@@ -379,4 +379,23 @@ describe("computeSignal", () => {
       expect(signal[0]).toBeGreaterThanOrEqual(0.9);
     });
   });
+
+  describe("Object.prototype key collisions", () => {
+    it("does not produce NaN for tokens that name inherited Object keys", () => {
+      // `constructor`, `toString`, `hasOwnProperty`, `valueOf` are inherited
+      // properties on a plain object, so a naive `keywords[token] !== undefined`
+      // lookup resolves them to functions and poisons the score with NaN.
+      const lines = [
+        "  constructor(filename: string, content: string) {",
+        "  toString() {",
+        "  hasOwnProperty(k: string) {",
+        "  valueOf() {",
+      ];
+      const signal = computeSignal(lines, tsLang);
+      for (const s of signal) {
+        expect(Number.isNaN(s)).toBe(false);
+        expect(Number.isFinite(s)).toBe(true);
+      }
+    });
+  });
 });
