@@ -274,9 +274,12 @@ function compileGlob(pat: string): RegExp {
   while (i < body.length) {
     const c = body[i];
     if (c === "*" && body[i + 1] === "*") {
-      regex += ".*";
-      i += 2;
-      if (body[i] === "/") i++;
+      // Globstar. `**/` matches zero or more leading path segments; a
+      // trailing or bare `**` matches anything including separators.
+      // Plain `.*` would let `**/foo` over-match `barfoo` / `x/barfoo`.
+      const hasTrailingSlash = body[i + 2] === "/";
+      i += hasTrailingSlash ? 3 : 2;
+      regex += hasTrailingSlash ? "(?:[^/]+/)*" : ".*";
     } else if (c === "*") {
       regex += "[^/]*";
       i++;

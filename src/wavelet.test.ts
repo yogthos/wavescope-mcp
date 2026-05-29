@@ -203,3 +203,22 @@ describe("computeCWT — boundary handling", () => {
     expect(result.coefficients[0].length).toBe(200);
   });
 });
+
+describe("detectPeaks — disable collapse (ridgeWindow < 0)", () => {
+  it("preserves cross-scale peaks at a position when collapse is disabled", () => {
+    const signal = new Array(200).fill(0);
+    signal[100] = 1.0;
+
+    const result = computeCWT(signal, [1, 2, 4, 8, 16, 32, 64, 128]);
+    const collapsed = detectPeaks(result, 0.1);
+    const all = detectPeaks(result, 0.1, 1000, -1);
+
+    const nearCollapsed = collapsed.filter((p) => Math.abs(p.position - 100) <= 2);
+    const nearAll = all.filter((p) => Math.abs(p.position - 100) <= 2);
+
+    // Default collapses the ridge to one peak; disabled keeps every scale.
+    expect(nearCollapsed.length).toBe(1);
+    expect(nearAll.length).toBeGreaterThan(1);
+    expect(new Set(nearAll.map((p) => p.scale)).size).toBeGreaterThan(1);
+  });
+});

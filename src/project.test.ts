@@ -488,3 +488,29 @@ describe("ProjectCache — cleanup", () => {
     }
   });
 });
+
+describe("ProjectIndex — .gitignore globstar (Round 2)", () => {
+  it("** matches whole path segments without over-matching substrings", async () => {
+    const dir = join(tmpdir(), `wavescope-globstar-${Date.now()}`);
+    await mkdir(dir, { recursive: true });
+    try {
+      await writeFile(join(dir, ".gitignore"), "**/ignoreme.ts\n");
+      await writeFile(join(dir, "ignoreme.ts"), "export const a = 1;\n");
+      await writeFile(join(dir, "keepignoreme.ts"), "export const b = 2;\n");
+      await mkdir(join(dir, "sub"), { recursive: true });
+      await writeFile(join(dir, "sub", "ignoreme.ts"), "export const c = 3;\n");
+      await writeFile(join(dir, "sub", "keep.ts"), "export const d = 4;\n");
+
+      const project = await ProjectIndex.load(dir);
+      const paths = project.listFiles();
+      // `**/ignoreme.ts` matches the file at any depth...
+      expect(paths).not.toContain("ignoreme.ts");
+      expect(paths).not.toContain("sub/ignoreme.ts");
+      // ...but must NOT exclude files that merely contain the suffix.
+      expect(paths).toContain("keepignoreme.ts");
+      expect(paths).toContain("sub/keep.ts");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

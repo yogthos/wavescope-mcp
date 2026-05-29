@@ -358,4 +358,25 @@ describe("computeSignal", () => {
       expect(detectLanguage("Gemfile").name).toBe("ruby");
     });
   });
+
+  describe("single-quote is not a string delimiter in Rust/Clojure (Round 3)", () => {
+    it("does not mask code after a Rust lifetime apostrophe", () => {
+      const rustLang = detectLanguage("test.rs");
+      // The lifetime `'a` must not swallow the `for` keyword that follows.
+      const signal = computeSignal(["impl<'a> Foo for Bar<'a> {"], rustLang);
+      // impl (0.9) + for (0.3) survive; with the bug only impl is counted.
+      expect(signal[0]).toBeGreaterThanOrEqual(1.0);
+    });
+
+    it("does not mask code after a Clojure quote", () => {
+      const cljLang = detectLanguage("test.clj");
+      // The quote `'[...]` must not swallow the trailing defn form.
+      const signal = computeSignal(
+        ["(def things '[a b c]) (defn realfn [] 1)"],
+        cljLang,
+      );
+      // def (0.7) + defn (0.9) survive; with the bug only def is counted.
+      expect(signal[0]).toBeGreaterThanOrEqual(0.9);
+    });
+  });
 });

@@ -7,12 +7,16 @@ import { LanguageConfig } from "./language.js";
  * with backslash escapes. Multi-line strings are out of scope — caller
  * passes a single physical line.
  */
-function maskStringLiterals(line: string): string {
+function maskStringLiterals(line: string, lang: LanguageConfig): string {
+  // In Rust `'a` is a lifetime and in Clojure `'` is the quote reader macro —
+  // neither is a string delimiter, so treating `'` as one would mask real
+  // code through to end-of-line. Only `"` and backtick delimit strings there.
+  const singleQuoteIsString = lang.name !== "rust" && lang.name !== "clojure";
   const chars = line.split("");
   let i = 0;
   while (i < chars.length) {
     const c = chars[i];
-    if (c === '"' || c === "'" || c === "`") {
+    if (c === '"' || c === "`" || (singleQuoteIsString && c === "'")) {
       const quote = c;
       let j = i + 1;
       while (j < chars.length) {
@@ -57,7 +61,7 @@ export function computeSignal(
     const stripped = trimmed.trimEnd();
     // String-masked version used for comment/keyword detection; original
     // line drives indent/length calculations.
-    const masked = maskStringLiterals(stripped);
+    const masked = maskStringLiterals(stripped, lang);
 
     // ── Handle multiline comments / docstrings (continued from previous line) ──
     if (inBlockComment) {
@@ -222,7 +226,7 @@ function scoreLine(
 
   // Strip string literals first so quoted `//` URLs and quoted `/*` don't
   // confuse keyword / inline-comment scanning.
-  let codeOnly = maskStringLiterals(stripped);
+  let codeOnly = maskStringLiterals(stripped, lang);
 
   // Strip inline single-line comment suffix
   for (const prefix of lang.commentPrefixes) {

@@ -342,3 +342,38 @@ describe("FileContext", () => {
     });
   });
 });
+
+describe("FileContext — coarse peaks survive next to a dominant fine spike (Round 1)", () => {
+  // A single sharp structural line surrounded by zero-signal comment lines:
+  // every scale peaks at line 100, but the strongest is the finest scale.
+  // With cross-scale collapse the coarse peak at 100 was dropped, so a
+  // coarse-scale summary fell back to even-sampled lines and lost it.
+  const lines: string[] = [];
+  for (let i = 0; i < 200; i++) lines.push(i === 100 ? "class Foo:" : "# filler");
+  const ctx = new FileContext("spike.py", lines.join("\n"));
+
+  it("surfaces the structural boundary at a coarse scale instead of dropping it", () => {
+    const summary = ctx.getSummaryAtScale(0, ctx.lineCount - 1, 128);
+    expect(summary).toContain("class Foo");
+  });
+
+  it("still ranks the boundary in get_important_positions", () => {
+    const positions = ctx.getImportantPositions(0.1, 10);
+    expect(positions.some((p) => p.position === 100)).toBe(true);
+  });
+});
+
+describe("FileContext — inferLabel keeps hyphenated identifiers (Round 4)", () => {
+  // Isolate the hyphenated defn as a lone high-signal line among comments so
+  // it reliably surfaces as the dominant peak.
+  const lines: string[] = [];
+  for (let i = 0; i < 41; i++) lines.push("; comment");
+  lines[20] = "(defn foo-bar [x] x)";
+  const ctx = new FileContext("app.clj", lines.join("\n"));
+
+  it("labels a Clojure defn with its full hyphenated name", () => {
+    const labels = ctx.getImportantPositions(0.0, 10).map((p) => p.label);
+    // Pre-fix the label-tokenizer split on '-' truncated this to "defn foo".
+    expect(labels.some((l) => l === "defn foo-bar")).toBe(true);
+  });
+});

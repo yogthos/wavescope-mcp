@@ -66,8 +66,9 @@ export class FileContext {
 
   get lineCount(): number { return this.lines.length; }
 
-  // Cached peak set — lazily computed once
+  // Cached peak sets — lazily computed once
   private _allPeaks: Peak[] | null = null;
+  private _rankedPeaks: Peak[] | null = null;
 
   constructor(filename: string, content: string) {
     this.filename = filename;
@@ -96,8 +97,25 @@ export class FileContext {
    */
   private getAllPeaks(): Peak[] {
     if (this._allPeaks) return this._allPeaks;
-    this._allPeaks = detectPeaks(this.coefficients, 0.0, 1000);
+    // ridgeWindow < 0 disables cross-scale collapse so peaks at every scale
+    // are preserved — band assembly (medium/coarse) and getSummaryAtScale
+    // filter this set by scale and must see all of them. Collapsing here
+    // would silently drop a coarse boundary that sits near a stronger fine
+    // peak, making scale-filtered views fall back to generic summaries.
+    this._allPeaks = detectPeaks(this.coefficients, 0.0, 1000, -1);
     return this._allPeaks;
+  }
+
+  /**
+   * Single ranked peak list with cross-scale ridge collapse applied, so a
+   * feature appearing at many scales yields one entry. Used by
+   * getImportantPositions, which wants a deduplicated importance ranking
+   * rather than the per-scale set band assembly needs.
+   */
+  private getRankedPeaks(): Peak[] {
+    if (this._rankedPeaks) return this._rankedPeaks;
+    this._rankedPeaks = detectPeaks(this.coefficients, 0.0, 1000);
+    return this._rankedPeaks;
   }
 
   // ─── Public API ──────────────────────────────────────────
@@ -110,7 +128,7 @@ export class FileContext {
     minCoefficient: number = 0.3,
     limit: number = 20,
   ): ImportantPosition[] {
-    const allPeaks = this.getAllPeaks();
+    const allPeaks = this.getRankedPeaks();
     // Deduplicate by position: keep the peak with the largest |coefficient|
     const bestMap = new Map<number, Peak>();
     for (const p of allPeaks) {
@@ -354,7 +372,7 @@ export class FileContext {
 
     // Tokenize on code delimiters (same regex as signal.ts) so that
     // forms like "(defn foo" correctly produce token "defn"
-    const tokens = line.split(/[\s()[\]{},;:'".=!<>+\-*/&|^~%@#`]+/).filter(Boolean);
+    const tokens = line.split(/[\s()[\]{},;:'"`=<>+*/&|^~%@#\\]+/).filter(Boolean);
     // Also keep whitespace-split tokens as fallback for label reading
     const wsTokens = line.split(/\s+/);
 
