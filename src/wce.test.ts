@@ -27,7 +27,6 @@ import {
   PREDICTOR_ZERO,
   FORMAT_VERSION,
   HEADER_SIZE,
-  BandEntropy,
 } from "./wce.js";
 
 const I32_MAX = 2147483647;
