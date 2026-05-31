@@ -214,6 +214,37 @@ Cancel a streaming operation and free its resources.
 
 Returns `{ acknowledged: true }`. Idempotent for unknown IDs.
 
+#### `get_entropy_bands`
+
+Analyze the wavelet coefficient bands of a file for entropy using
+[libwce](https://github.com/yogthos/libwce) bit-cost estimation. For each
+scale in the Ricker CWT, coefficients are quantized to integers, their
+Bit-Plane Counts are computed, and the encoding bit cost is estimated.
+Higher bit cost = more structural irregularity at that scale — a
+language-agnostic measure of local code complexity.
+
+- `file` — absolute path to the file
+- `lossy_bits` — LSBs to drop before BPC computation, 0–8 (default 0; higher
+  is coarser)
+
+Returns `{ bands, totalBitCost, meanBitCost }` where each band carries its
+`scale`, `bitCost`, `riceK`, `predictor`, `sparseFlag`, and `numGroups`.
+
+#### `get_complexity_heatmap`
+
+Compute a multi-scale complexity heatmap for a file using a Haar DWT plus
+libwce. The per-line structural signal is decomposed, the encoding bit cost
+is estimated per detail band, and per-line irregularity scores are returned.
+Higher scores mark structurally dense/irregular regions — useful for review
+prioritization, context budgeting (keep irregular, summarize boilerplate),
+and navigation.
+
+- `file` — absolute path to the file
+- `lossy_bits` — LSBs to drop before BPC computation, 0–8 (default 0)
+
+Returns `{ bands, totalEntropy, perLineIrregularity }` where each band carries
+its `level`, `span`, `bitCost`, `riceK`, `predictor`, and `sparseFlag`.
+
 ## Development
 
 ```bash
