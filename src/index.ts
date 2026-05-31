@@ -14,6 +14,8 @@ import { CursorManager } from "./cursor.js";
 import { ImportantPosition } from "./context.js";
 import { diffFileAtRefs, DiffFileMissingError } from "./diff.js";
 import { StreamManager } from "./streaming.js";
+import { computeComplexityHeatmap } from "./entropy.js";
+import { computeBandEntropy } from "./wce.js";
 
 // ─── Shared file cache ────────────────────────────────────────
 
@@ -648,6 +650,115 @@ server.registerTool(
       return {
         content: [{ type: "text" as const, text: JSON.stringify({ acknowledged: true }) }],
       };
+    }),
+);
+
+// ─── get_entropy_bands ──────────────────────────────────────
+
+server.registerTool(
+  "get_entropy_bands",
+  {
+    description:
+      "Analyze wavelet coefficient bands for entropy using libwce bit-cost estimation. " +
+      "For each scale in the Ricker CWT, quantizes coefficients to integers, " +
+      "computes Bit-Plane Counts, and estimates the encoding bit cost. " +
+      "Higher bit cost = more structural irregularity at that scale. " +
+      "This is a language-agnostic measure of local code complexity.",
+    inputSchema: {
+      file: z.string().describe("Absolute path to the file"),
+      lossy_bits: z.number().int().min(0).max(8).default(0).describe(
+        "LSBs to drop before BPC computation. 0 = full precision, 4-8 = coarser. Default 0.",
+      ),
+    },
+  },
+  ({ file, lossy_bits }) =>
+    track(async () => {
+      try {
+        requireAbsoluteFile(file);
+        const ctx = await getFileContext(file);
+        const { coefficients, scales } = ctx.coefficients;
+
+        const bands = [];
+        for (let si = 0; si < scales.length; si++) {
+          const coeffs = coefficients[si];
+          // Quantize float coefficients to i32 range
+          const maxAbs = coeffs.reduce((m, c) => Math.max(m, Math.abs(c)), 0);
+          const scale = maxAbs > 0 ? (2147483647 / maxAbs) : 1;
+          const intCoeffs: number[] = [];
+          for (const c of coeffs) {
+            intCoeffs.push(Math.round(c * scale));
+          }
+          // Pad to multiple of 4
+          while (intCoeffs.length & 3) intCoeffs.push(0);
+
+          const ent = computeBandEntropy(intCoeffs, lossy_bits);
+          bands.push({
+            scale: scales[si],
+            bitCost: ent.bitCost,
+            riceK: ent.riceK,
+            predictor: ent.predictor,
+            sparseFlag: ent.sparseFlag,
+            numGroups: ent.numGroups,
+          });
+        }
+
+        const totalBitCost = bands.reduce((s, b) => s + b.bitCost, 0);
+
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify({
+            bands,
+            totalBitCost,
+            meanBitCost: bands.length > 0 ? totalBitCost / bands.length : 0,
+          }, null, 2) }],
+        };
+      } catch (err) {
+        return toolErrorResponse(curateFsError(err));
+      }
+    }),
+);
+
+// ─── get_complexity_heatmap ─────────────────────────────────
+
+server.registerTool(
+  "get_complexity_heatmap",
+  {
+    description:
+      "Compute a multi-scale complexity heatmap for a file using Haar DWT + libwce. " +
+      "Decomposes the per-line structural signal, estimates encoding bit cost per detail band, " +
+      "and returns per-line irregularity scores. Higher scores mark structurally dense/irregular regions. " +
+      "Useful for: review prioritization (sort by entropy), context budgeting (keep irregular, summarize boilerplate), " +
+      "and navigation (complement wavelet importance with a texture/regularity axis).",
+    inputSchema: {
+      file: z.string().describe("Absolute path to the file"),
+      lossy_bits: z.number().int().min(0).max(8).default(0).describe(
+        "LSBs to drop before BPC computation. 0 = full precision. Default 0.",
+      ),
+    },
+  },
+  ({ file, lossy_bits }) =>
+    track(async () => {
+      try {
+        requireAbsoluteFile(file);
+        const ctx = await getFileContext(file);
+        const heatmap = computeComplexityHeatmap(ctx.signal, lossy_bits);
+
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify({
+            bands: heatmap.bands.map(b => ({
+              level: b.level,
+              span: b.span,
+              bitCost: b.bitCost,
+              riceK: b.riceK,
+              predictor: b.predictor,
+              sparseFlag: b.sparseFlag,
+            })),
+            totalEntropy: heatmap.totalEntropy,
+            perLineIrregularity: heatmap.perLineIrregularity,
+          }, null, 2) }],
+        };
+      } catch (err) {
+        return toolErrorResponse(curateFsError(err));
+      }
     }),
 );
 
