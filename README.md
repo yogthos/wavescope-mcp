@@ -24,6 +24,8 @@ entire files into context.
    - **Fine** (scales 1–2): raw lines in ±`radius/5` (≥10 lines)
    - **Medium** (scales 4–16): function/class signatures in ±`radius/2`
    - **Coarse** (scales 32–128): section-level structural summary across ±`radius`
+  
+See [here](https://yogthos.net/posts/2026-06-02-wavescope.html) for a more detailed explanation.
 
 ## Installation
 
