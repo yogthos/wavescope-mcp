@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { isAbsolute, resolve, relative } from "node:path";
 import { stat as fsStat } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { z } from "zod";
 import { FileCache } from "./file-cache.js";
 import {
@@ -16,6 +17,12 @@ import { diffFileAtRefs, DiffFileMissingError } from "./diff.js";
 import { StreamManager } from "./streaming.js";
 import { computeComplexityHeatmap } from "./entropy.js";
 import { computeBandEntropy } from "./wce.js";
+
+// Report the real package version to MCP clients instead of a hardcoded
+// string that drifts from package.json on every release.
+const PACKAGE_VERSION: string = createRequire(import.meta.url)(
+  "../package.json",
+).version;
 
 // ─── Shared file cache ────────────────────────────────────────
 
@@ -71,7 +78,7 @@ function track<T>(fn: () => Promise<T>): Promise<T> {
 
 const server = new McpServer({
   name: "wavescope-mcp",
-  version: "1.0.0",
+  version: PACKAGE_VERSION,
 });
 
 // ─── query_wavelet_context ─────────────────────────────────
@@ -148,10 +155,14 @@ server.registerTool(
         let positions;
         let truncated = false;
         if (directory) {
+          if (!isAbsolute(directory)) {
+            throw new ToolError("`directory` must be an absolute path");
+          }
           const project = await ProjectIndex.load(resolve(directory), fileCache);
           positions = project.getImportantPositions(min_coefficient, limit);
           truncated = project.truncated;
         } else {
+          requireAbsoluteFile(file!);
           const ctx = await getFileContext(file!);
           positions = ctx.getImportantPositions(min_coefficient, limit);
         }
@@ -847,6 +858,7 @@ if (!process.env.VITEST) {
 // ─── Test-only exports ─────────────────────────────────────
 
 export const __test_getFileContext = getFileContext;
+export const __test_serverVersion = PACKAGE_VERSION;
 export const __test_clearCache = () => fileCache.clear();
 export const __test_cacheSize = () => fileCache.size;
 export const __test_MAX_CACHE_ENTRIES = fileCache.maxEntries;
