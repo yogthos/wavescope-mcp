@@ -9,15 +9,24 @@ entire files into context.
 
 ## How it works
 
-1. **Structural signal** — each line gets an importance score based on
-   indentation, keywords (`class`, `def`, `export`, etc.), and comment status.
+1. **Structural signal** — each line gets an importance score from the
+   keywords it declares (`class`, `def`, `export`, etc.), with comments and
+   blank lines scoring zero. Indentation attenuates the score rather than
+   adding to it: a line nested eight levels deep is less of a landmark than
+   a top-level declaration, and a line that declares nothing stays near zero
+   at any depth.
 
 2. **Ricker wavelet transform** — the signal is convolved with Ricker (Mexican
    hat) wavelets at 8 scales (1–128), detecting structural boundaries at
    multiple resolutions.
 
 3. **Multi-scale peaks** — coefficient maxima are extracted and sorted by
-   magnitude, identifying the most important structural transitions.
+   magnitude, identifying the most important structural transitions. A
+   coefficient is an integral over a window, so its maximum often falls
+   between two declarations rather than on either; reported positions are
+   snapped to the nearest line that is both a local signal maximum and a
+   meaningful share of the structure around it, so they land on code you can
+   navigate to rather than on a blank line or a stray `}`.
 
 4. **Band assembly** — three zoom levels, sized as a fraction of the query
    `radius` (default 300):

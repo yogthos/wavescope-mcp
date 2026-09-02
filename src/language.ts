@@ -10,7 +10,11 @@ export interface LanguageConfig {
   /** Line patterns that are docstrings or block comments */
   blockCommentStart: string;
   blockCommentEnd: string;
-  /** Multipliers for indentation depth */
+  /**
+   * Per-level decay rate for indentation. A line's structural score is
+   * divided by (1 + depth * indentWeight), so deeper nesting attenuates
+   * prominence. Higher values attenuate faster.
+   */
   indentWeight: number;
   /** Decorator/annotation weight */
   decoratorWeight: number;

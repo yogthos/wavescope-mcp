@@ -514,3 +514,107 @@ describe("FileContext — band assembly still uses both peak signs", () => {
     expect(ctx2.bands.medium.content.length).toBeGreaterThan(0);
   });
 });
+
+describe("FileContext — important positions prefer declarations over nested bodies", () => {
+  const src = [
+    "import { readFile } from 'fs';",
+    "",
+    "export class Registry {",
+    "  private items: string[] = [];",
+    "",
+    "  add(item: string): void {",
+    "    this.items.push(item);",
+    "  }",
+    "}",
+    "",
+    "export async function discover(root: string): Promise<string[]> {",
+    "  const results: string[] = [];",
+    "  async function worker() {",
+    "    while (cursor < pending.length) {",
+    "      const idx = cursor++;",
+    "      const { fullPath, mtimeMs } = pending[idx];",
+    "      if (await isBinary(fullPath)) continue;",
+    "      let content: string;",
+    "      try {",
+    "        content = await readFile(fullPath, 'utf8');",
+    "      } catch {",
+    "        continue;",
+    "      }",
+    "      results.push({",
+    "        filename: basename(fullPath),",
+    "        path: fullPath,",
+    "      });",
+    "    }",
+    "  }",
+    "  return results;",
+    "}",
+    "",
+    "export interface Options { root: string; }",
+  ].join("\n");
+
+  const ctx = new FileContext("registry.ts", src);
+  const positions = ctx.getImportantPositions(0.3, 6);
+
+  it("never anchors on a bare closing brace or loop-control statement", () => {
+    for (const p of positions) {
+      const text = ctx.lines[p.position].trim();
+      expect(text, `line ${p.position}`).not.toMatch(/^(\}|\{|continue;|break;|\);|\}\);)$/);
+    }
+  });
+
+  it("anchors every position on a landmark, never on filler", () => {
+    // The invariant snapToStructure establishes: a reported position is a
+    // local maximum of the signal and carries a meaningful share of the
+    // structure around it, never a filler line that merely sat at a
+    // wavelet's centre of mass.
+    for (const p of positions) {
+      const i = p.position;
+      const prev = i > 0 ? ctx.signal[i - 1] : -1;
+      const next = i < ctx.signal.length - 1 ? ctx.signal[i + 1] : -1;
+      expect(ctx.signal[i], `line ${i} is not a local max`).toBeGreaterThanOrEqual(prev);
+      expect(ctx.signal[i], `line ${i} is not a local max`).toBeGreaterThanOrEqual(next);
+      expect(ctx.signal[i], `line ${i} is filler`).toBeGreaterThan(0.1);
+    }
+  });
+
+  it("reports every top-level declaration in the file", () => {
+    const reported = new Set(positions.map((p) => p.position));
+    for (const line of [2, 10, 32]) {
+      expect(reported.has(line), `line ${line} missing`).toBe(true);
+    }
+  });
+});
+
+describe("FileContext — Go declaration labels", () => {
+  function labelFor(line: string): string | undefined {
+    const lines: string[] = [];
+    for (let i = 0; i < 41; i++) lines.push("// comment");
+    lines[20] = line;
+    const ctx = new FileContext("a.go", lines.join("\n"));
+    return ctx.getImportantPositions(0.0, 10).find((p) => p.position === 20)?.label;
+  }
+
+  it("labels a named struct type with its own name", () => {
+    // Go writes the name before the keyword; the generic "name follows the
+    // keyword" rule produced "struct undefined".
+    expect(labelFor("type Repo struct {")).toBe("struct Repo");
+  });
+
+  it("labels a named interface type with its own name", () => {
+    expect(labelFor("type Scanner interface {")).toBe("interface Scanner");
+  });
+
+  it("labels a method with its receiver type and name, not the receiver variable", () => {
+    // Produced "func r" — the receiver variable, not the method.
+    expect(labelFor("func (r *Repo) Scan() error {")).toBe("func (Repo) Scan");
+    expect(labelFor("func (r Repo) Close() {")).toBe("func (Repo) Close");
+  });
+
+  it("still labels a plain function with its name", () => {
+    expect(labelFor("func main() {")).toBe("func main");
+  });
+
+  it("still labels a type alias", () => {
+    expect(labelFor("type ID = string")).toBe("type ID");
+  });
+});

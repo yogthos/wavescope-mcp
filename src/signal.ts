@@ -3,6 +3,16 @@ import { LanguageConfig } from "./language.js";
 const DEFAULT_STRING_DELIMITERS = ['"', "'", "`"];
 
 /**
+ * Floor score for any line of real code, before indent attenuation. Keeps
+ * the keyword-less generic config (unknown file extensions) producing a
+ * usable signal that still separates code from blank and comment lines.
+ */
+const CODE_LINE_BASE = 0.05;
+
+/** Indent depth, in 4-space levels, beyond which attenuation stops growing. */
+const MAX_INDENT_DEPTH = 8;
+
+/**
  * Mask the interior of single-line string and char literals with spaces
  * so that downstream comment / token detection ignores their contents.
  * Which characters delimit a string comes from `lang.stringDelimiters`
@@ -206,11 +216,16 @@ export function computeSignal(
         const delim = codePart.slice(dqIdx, dqIdx + 3);
         const before = codePart.slice(0, dqIdx).trim();
         const after = codePart.slice(dqIdx + 3);
-        const hasClosing = after.includes(delim);
+        const closeIdx = after.indexOf(delim);
 
-        if (hasClosing) {
-          const real = [before, after.replaceAll(delim, "").trim()]
-            .filter(Boolean).join("; ");
+        if (closeIdx !== -1) {
+          // Code resumes after the *closing* delimiter. Scoring the text
+          // between the delimiters would score the docstring's prose as
+          // code: `"""Returns a class"""` scored the same as `class Foo:`,
+          // and `"""Handle the class registry for each def"""` hit the 2.0
+          // ceiling — pure prose ranked as the file's strongest structure.
+          const trailing = after.slice(closeIdx + delim.length).trim();
+          const real = [before, trailing].filter(Boolean).join("; ");
           signal[i] = real ? scoreLine(raw, real, indent, lang) : 0;
           continue;
         }
@@ -288,14 +303,6 @@ function scoreLine(
     codeOnly = codeOnly.slice(0, commentIdx).trim();
   }
 
-  // Indent: expand tabs as 4 spaces so tab-indented files (Go, etc.)
-  // score comparably to space-indented ones.
-  const leading = raw.slice(0, rawIndent);
-  let expandedIndent = 0;
-  for (const ch of leading) expandedIndent += ch === "\t" ? 4 : 1;
-  const indentLevel = Math.min(expandedIndent / 4, 8);
-  score += indentLevel * lang.indentWeight;
-
   const tokens = tokenize(codeOnly);
   for (const token of tokens) {
     if (!token) continue;
@@ -318,5 +325,27 @@ function scoreLine(
     }
   }
 
-  return Math.min(score, 2.0);
+  // Indentation attenuates structural prominence rather than adding to it.
+  //
+  // It used to be additive, which let depth manufacture structure out of
+  // nothing: in TypeScript a line containing no keyword at all scored
+  // 8 * 0.15 = 1.20 at eight levels of indent, above `class` (1.0) and
+  // above a real top-level class declaration. A broad plateau of such
+  // lines then integrated to a larger coarse-scale CWT coefficient than an
+  // isolated declaration spike, so peaks anchored on `}` and `continue;`
+  // inside nested helpers instead of on the declarations around them.
+  //
+  // Nesting depth is evidence against being a landmark, not for it, so it
+  // now scales the score down. `indentWeight` is the per-level decay rate;
+  // a line that declares nothing stays near zero at every depth.
+  //
+  // Tabs expand to 4 spaces so tab-indented files (Go, etc.) attenuate
+  // comparably to space-indented ones.
+  const leading = raw.slice(0, rawIndent);
+  let expandedIndent = 0;
+  for (const ch of leading) expandedIndent += ch === "\t" ? 4 : 1;
+  const depth = Math.min(expandedIndent / 4, MAX_INDENT_DEPTH);
+  const attenuation = 1 / (1 + depth * lang.indentWeight);
+
+  return Math.min((score + CODE_LINE_BASE) * attenuation, 2.0);
 }
