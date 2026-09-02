@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { computeSignal } from "./signal.js";
-import { detectLanguage } from "./language.js";
+import { detectLanguage, configs } from "./language.js";
 
 describe("computeSignal", () => {
   const pyLang = detectLanguage("test.py");
@@ -891,5 +891,67 @@ describe("syntactic declaration detection for brace languages", () => {
     it("ignores a declaration written inside a string", () => {
       expect(score('  const s = "void scan() {";')).toBeLessThan(0.6);
     });
+  });
+});
+
+describe("configs only score keywords their language actually has", () => {
+  // The shared cLike/tsLike bases were spread wholesale into languages that
+  // lack many of those keywords, so an ordinary identifier scored as
+  // structure: Go rated `class` at 1.0, its highest weight, for a language
+  // with no classes, and Java rated `function` at 0.9.
+  const ALIEN: Record<string, string[]> = {
+    go: ["class", "export", "let", "async", "try", "catch", "finally", "while", "throw", "do"],
+    rust: ["class", "export"],
+    java: ["function", "let", "async", "export", "type"],
+    php: ["let", "async", "export"],
+    swift: ["export", "finally"],
+    kotlin: ["export", "switch", "case", "default", "static"],
+    scala: ["let", "async", "switch", "default", "static", "public"],
+  };
+
+  for (const [langName, alien] of Object.entries(ALIEN)) {
+    const cfg = configs.find((c) => c.name === langName)!;
+    it(`${langName} does not define keywords it lacks`, () => {
+      for (const word of alien) {
+        expect(Object.hasOwn(cfg.structuralKeywords, word), `${langName}.${word}`)
+          .toBe(false);
+      }
+    });
+
+    it(`${langName} scores those words as ordinary identifiers`, () => {
+      for (const word of alien) {
+        const score = computeSignal([`${word} = 1`], cfg)[0];
+        expect(score, `${langName}: ${word}`).toBeLessThan(0.3);
+      }
+    });
+  }
+
+  it("Go still scores its own keywords, including type and interface", () => {
+    const go = configs.find((c) => c.name === "go")!;
+    for (const [line, min] of [
+      ["type Repo struct {", 1.0],
+      ["type Scanner interface {", 1.0],
+      ["func main() {", 0.9],
+      ["package main", 0.3],
+      ["for i := range xs {", 0.3],
+    ] as const) {
+      expect(computeSignal([line], go)[0], line).toBeGreaterThanOrEqual(min);
+    }
+  });
+
+  it("keeps the keywords each language really has", () => {
+    const has = (name: string, words: string[]) => {
+      const cfg = configs.find((c) => c.name === name)!;
+      for (const w of words) {
+        expect(Object.hasOwn(cfg.structuralKeywords, w), `${name}.${w}`).toBe(true);
+      }
+    };
+    has("java", ["class", "interface", "enum", "package", "extends", "implements", "try", "catch"]);
+    has("go", ["func", "struct", "package", "import", "defer", "go"]);
+    has("rust", ["fn", "impl", "trait", "struct", "enum", "mod", "use"]);
+    has("php", ["function", "class", "interface", "trait", "namespace"]);
+    has("swift", ["func", "protocol", "extension", "struct", "class"]);
+    has("kotlin", ["fun", "class", "object", "val", "suspend"]);
+    has("scala", ["def", "trait", "object", "val", "case"]);
   });
 });
