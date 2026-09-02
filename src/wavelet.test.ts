@@ -222,3 +222,88 @@ describe("detectPeaks — disable collapse (ridgeWindow < 0)", () => {
     expect(new Set(nearAll.map((p) => p.scale)).size).toBeGreaterThan(1);
   });
 });
+
+describe("detectPeaks — positiveOnly", () => {
+  it("returns only positive-coefficient peaks when enabled", () => {
+    const signal = new Array(200).fill(0);
+    signal[50] = 1.0;
+    signal[120] = 2.0;
+
+    const result = computeCWT(signal, [1, 2, 4, 8, 16, 32]);
+    const all = detectPeaks(result, 0.1, 1000, 2, false);
+    const positive = detectPeaks(result, 0.1, 1000, 2, true);
+
+    expect(all.some((p) => p.coefficient < 0)).toBe(true);
+    expect(positive.every((p) => p.coefficient > 0)).toBe(true);
+    expect(positive.length).toBeGreaterThan(0);
+  });
+
+  it("filters before ridge collapse so a positive peak is not suppressed by a stronger adjacent negative one", () => {
+    // A lone spike: the Ricker negative lobes flank the positive centre
+    // closely at fine scales. Post-filtering would let a stronger negative
+    // lobe ridge-collapse the positive peak out of existence.
+    const signal = new Array(200).fill(0);
+    signal[100] = 1.0;
+
+    const positive = detectPeaks(result(signal), 0.05, 1000, 8, true);
+    expect(positive.some((p) => Math.abs(p.position - 100) <= 2)).toBe(true);
+
+    function result(s: number[]) {
+      return computeCWT(s, [1, 2, 4, 8, 16, 32, 64, 128]);
+    }
+  });
+
+  it("defaults to keeping negative peaks", () => {
+    const signal = new Array(200).fill(0);
+    signal[100] = 1.0;
+    const result = computeCWT(signal, [1, 2, 4, 8, 16, 32]);
+    expect(detectPeaks(result, 0.1, 1000, -1)).toEqual(
+      detectPeaks(result, 0.1, 1000, -1, false),
+    );
+  });
+});
+
+describe("computeCWT — kernel stays zero-mean when truncated", () => {
+  // A wavelet has zero mean by definition, so a signal with no variation
+  // must transform to zero. Truncating the kernel to the signal length used
+  // to clip away the negative lobes, leaving a box filter with a large DC
+  // response: a flat signal produced 6.53 at scale 128 on 200 samples.
+  for (const N of [33, 60, 100, 200, 512]) {
+    it(`constant signal produces near-zero coefficients at every scale (N=${N})`, () => {
+      const flat = new Array(N).fill(0.5);
+      const result = computeCWT(flat);
+      for (let si = 0; si < result.scales.length; si++) {
+        const mid = result.coefficients[si][Math.floor(N / 2)];
+        expect(Math.abs(mid), `scale ${result.scales[si]}`).toBeLessThan(0.05);
+      }
+    });
+  }
+
+  it("holds for a non-zero constant at any offset", () => {
+    const flat = new Array(80).fill(2.0);
+    const result = computeCWT(flat);
+    for (let si = 0; si < result.scales.length; si++) {
+      for (const pos of [20, 40, 60]) {
+        expect(Math.abs(result.coefficients[si][pos])).toBeLessThan(0.2);
+      }
+    }
+  });
+
+  it("still responds to a real spike at coarse scales", () => {
+    // The fix must not flatten genuine structure into nothing.
+    const signal = new Array(200).fill(0);
+    signal[100] = 1.0;
+    const result = computeCWT(signal, [32, 64]);
+    for (let si = 0; si < result.scales.length; si++) {
+      expect(Math.abs(result.coefficients[si][100])).toBeGreaterThan(0.01);
+    }
+  });
+
+  it("still separates a step change from a flat region", () => {
+    const signal = [...new Array(100).fill(0), ...new Array(100).fill(1)];
+    const result = computeCWT(signal, [16]);
+    const atStep = Math.abs(result.coefficients[0][100]);
+    const inFlat = Math.abs(result.coefficients[0][40]);
+    expect(atStep).toBeGreaterThan(inFlat);
+  });
+});

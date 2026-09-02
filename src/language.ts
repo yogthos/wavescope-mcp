@@ -10,7 +10,11 @@ export interface LanguageConfig {
   /** Line patterns that are docstrings or block comments */
   blockCommentStart: string;
   blockCommentEnd: string;
-  /** Multipliers for indentation depth */
+  /**
+   * Per-level decay rate for indentation. A line's structural score is
+   * divided by (1 + depth * indentWeight), so deeper nesting attenuates
+   * prominence. Higher values attenuate faster.
+   */
   indentWeight: number;
   /** Decorator/annotation weight */
   decoratorWeight: number;
@@ -45,6 +49,15 @@ export interface LanguageConfig {
    * generic `(def* name ...)` / `(define* name ...)` labelling rule.
    */
   family?: "lisp";
+  /**
+   * Score floor for a function or method declaration recognised by syntax
+   * rather than by keyword — `name(params) { ... }`. Set it for brace
+   * languages where a method needs no definition keyword (Java, C#, C,
+   * C++) or where a class method omits one (TypeScript, JavaScript).
+   * Leave unset for languages whose definitions always carry a keyword
+   * (`def`, `func`, `fn`, `defn`, `define`), where it would be a no-op.
+   */
+  declarationWeight?: number;
 }
 
 // ─── Base keyword sets ───────────────────────────────────────
@@ -88,6 +101,22 @@ const tsLikeKeywords: Record<string, number> = {
   type: 0.5,
   enum: 0.8,
 };
+
+/**
+ * Build a keyword set from a shared base minus the words the target
+ * language does not actually have. The cLike/tsLike bases are a
+ * convenience, not a claim that every language shares their vocabulary:
+ * spread wholesale, they had Go scoring `class` at 1.0 and Java scoring
+ * `function` at 0.9, so an ordinary identifier rated as a declaration.
+ */
+function without(
+  base: Record<string, number>,
+  ...drop: string[]
+): Record<string, number> {
+  const out: Record<string, number> = { ...base };
+  for (const word of drop) delete out[word];
+  return out;
+}
 
 // ─── Language configurations ─────────────────────────────────
 
@@ -135,6 +164,8 @@ const tsConfig: LanguageConfig = {
   blockCommentEnd: "*/",
   indentWeight: 0.15,
   decoratorWeight: 0.5,
+  // Methods here need no definition keyword; see declarationWeight.
+  declarationWeight: 0.85,
 };
 
 const jsConfig: LanguageConfig = {
@@ -150,19 +181,35 @@ const jsConfig: LanguageConfig = {
   blockCommentEnd: "*/",
   indentWeight: 0.15,
   decoratorWeight: 0.5,
+  // Methods here need no definition keyword; see declarationWeight.
+  declarationWeight: 0.85,
 };
 
 const goConfig: LanguageConfig = {
   name: "go",
   extensions: [".go"],
   structuralKeywords: {
-    ...cLikeKeywords,
+    // Go has no classes, no exceptions, no `while`, no `let`/`async`/`export`.
+    ...without(
+      cLikeKeywords,
+      "class", "export", "let", "async", "try", "catch", "finally",
+      "while", "throw", "do",
+    ),
     func: 0.9,
+    type: 0.9,
+    struct: 0.9,
+    interface: 0.9,
+    package: 0.3,
     go: 0.2,
     defer: 0.2,
     select: 0.2,
-    struct: 0.9,
-    package: 0.3,
+    range: 0.2,
+    chan: 0.2,
+    map: 0.1,
+    fallthrough: 0.1,
+    goto: 0.2,
+    break: 0.2,
+    continue: 0.2,
   },
   commentPrefixes: ["//"],
   blockCommentStart: "/*",
@@ -175,7 +222,8 @@ const rustConfig: LanguageConfig = {
   name: "rust",
   extensions: [".rs"],
   structuralKeywords: {
-    ...cLikeKeywords,
+    // Rust has no `class` and no `export`.
+    ...without(cLikeKeywords, "class", "export"),
     fn: 0.9,
     impl: 0.9,
     mod: 0.6,
@@ -205,7 +253,8 @@ const javaConfig: LanguageConfig = {
   name: "java",
   extensions: [".java"],
   structuralKeywords: {
-    ...tsLikeKeywords,
+    // Java has no `function`, `let`, `async`, `export`, or `type` keyword.
+    ...without(tsLikeKeywords, "function", "let", "async", "export", "type"),
     package: 0.6,
     extends: 0.5,
     implements: 0.5,
@@ -221,6 +270,8 @@ const javaConfig: LanguageConfig = {
   blockCommentEnd: "*/",
   indentWeight: 0.15,
   decoratorWeight: 0.5,
+  // Methods here need no definition keyword; see declarationWeight.
+  declarationWeight: 0.85,
 };
 
 const rubyConfig: LanguageConfig = {
@@ -269,7 +320,8 @@ const phpConfig: LanguageConfig = {
   name: "php",
   extensions: [".php"],
   structuralKeywords: {
-    ...tsLikeKeywords,
+    // PHP has no `let`, `async`, or `export`.
+    ...without(tsLikeKeywords, "let", "async", "export"),
     namespace: 0.6,
     use: 0.5,
     trait: 0.8,
@@ -292,7 +344,8 @@ const swiftConfig: LanguageConfig = {
   name: "swift",
   extensions: [".swift"],
   structuralKeywords: {
-    ...cLikeKeywords,
+    // Swift has no `export`; error handling is do/catch with no `finally`.
+    ...without(cLikeKeywords, "export", "finally"),
     func: 0.9,
     guard: 0.3,
     defer: 0.2,
@@ -323,8 +376,10 @@ const kotlinConfig: LanguageConfig = {
   name: "kotlin",
   extensions: [".kt", ".kts"],
   structuralKeywords: {
-    ...cLikeKeywords,
+    // Kotlin has no `export` and no `static`; `when` replaces `switch`.
+    ...without(cLikeKeywords, "export", "switch", "case", "default", "static"),
     fun: 0.9,
+    when: 0.3,
     val: 0.2,
     object: 0.7,
     companion: 0.4,
@@ -353,7 +408,9 @@ const scalaConfig: LanguageConfig = {
   name: "scala",
   extensions: [".scala", ".sc"],
   structuralKeywords: {
-    ...cLikeKeywords,
+    // Scala has no `let`, `async`, `switch`, `static`, or `public`;
+    // `match` replaces `switch`. Scala 3 does have `export`, so it stays.
+    ...without(cLikeKeywords, "let", "async", "switch", "default", "static", "public"),
     def: 0.9,
     val: 0.2,
     object: 0.7,
@@ -638,6 +695,8 @@ const genericConfig: LanguageConfig = {
   blockCommentEnd: "*/",
   indentWeight: 0.1,
   decoratorWeight: 0.3,
+  // Methods here need no definition keyword; see declarationWeight.
+  declarationWeight: 0.85,
 };
 
 // Ordered by priority — genericConfig (last) is the fallback.

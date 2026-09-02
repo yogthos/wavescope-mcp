@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { computeSignal } from "./signal.js";
-import { detectLanguage } from "./language.js";
+import { detectLanguage, configs } from "./language.js";
 
 describe("computeSignal", () => {
   const pyLang = detectLanguage("test.py");
@@ -56,10 +56,12 @@ describe("computeSignal", () => {
       expect(signal[1]).toBe(0);
       expect(signal[2]).toBeGreaterThanOrEqual(1.0);
       expect(signal[2]).toBeLessThanOrEqual(2.0);
-      expect(signal[3]).toBeGreaterThan(0.9);
-      expect(signal[3]).toBeLessThanOrEqual(2.0);
+      // Methods sit one level in, so they attenuate below a top-level def
+      // while staying far above the surrounding statement lines.
+      expect(signal[3]).toBeGreaterThan(0.8);
+      expect(signal[3]).toBeLessThan(signal[2]);
       expect(signal[4]).toBeLessThan(0.5);
-      expect(signal[5]).toBeGreaterThan(0.9);
+      expect(signal[5]).toBeGreaterThan(0.8);
       expect(signal[6]).toBeGreaterThan(0.1);
       expect(signal[7]).toBe(0);
       expect(signal[8]).toBeGreaterThan(0.2);
@@ -76,7 +78,10 @@ describe("computeSignal", () => {
       expect(signal[0]).toBeLessThanOrEqual(2.0);
     });
 
-    it("indentation increases signal proportionally", () => {
+    it("indentation attenuates signal proportionally", () => {
+      // Was asserted the other way round. Additive indent let a line with
+      // no structural content outscore a real declaration; nesting depth
+      // now scales the score down instead.
       const lines = [
         "pass",
         "    pass",
@@ -84,9 +89,9 @@ describe("computeSignal", () => {
         "            pass",
       ];
       const signal = computeSignal(lines, pyLang);
-      expect(signal[0]).toBeLessThan(signal[1]);
-      expect(signal[1]).toBeLessThan(signal[2]);
-      expect(signal[2]).toBeLessThan(signal[3]);
+      expect(signal[0]).toBeGreaterThan(signal[1]);
+      expect(signal[1]).toBeGreaterThan(signal[2]);
+      expect(signal[2]).toBeGreaterThan(signal[3]);
     });
 
     it("handles function calls with parentheses touching keyword", () => {
@@ -248,9 +253,12 @@ describe("computeSignal", () => {
 
   describe("member-access keyword leak", () => {
     it("does not score 'class' when used as Python attribute access", () => {
+      // Every line of real code now carries a small base score, so the
+      // assertion is that `class` (1.0) was not counted — matching the
+      // sibling TS member-access test below.
       const lines = ["x = obj.class"];
       const signal = computeSignal(lines, pyLang);
-      expect(signal[0]).toBe(0);
+      expect(signal[0]).toBeLessThan(0.3);
     });
 
     it("does not score 'def' when used as TS member access", () => {
@@ -651,5 +659,299 @@ describe("block comment opener inside a line comment", () => {
     const lines = ['x = 1  # """', "class Foo: pass"];
     const signal = computeSignal(lines, pyLang);
     expect(signal[1]).toBeGreaterThanOrEqual(1.0);
+  });
+});
+
+describe("indentation attenuates structural score, it does not create it", () => {
+  const LANGS = ["a.ts", "a.py", "a.go", "a.rs", "a.java", "a.rb", "a.clj", "a.scm", "a.lisp"];
+
+  it("a keyword-free line never outscores a top-level declaration, at any depth", () => {
+    // Pre-fix, TypeScript scored a bare `zzz;` at 8 levels of indent as 1.20
+    // — above `class` (1.0) and above a real `class AbortError ... {` line.
+    for (const name of LANGS) {
+      const lang = detectLanguage(name);
+      const maxKeyword = Math.max(...Object.values(lang.structuralKeywords));
+      const topDecl = maxKeyword;
+      for (const depth of [1, 2, 4, 6, 8, 16]) {
+        const filler = " ".repeat(depth * 4) + "zzz;";
+        const score = computeSignal([filler], lang)[0];
+        expect(score, `${lang.name} at depth ${depth}`).toBeLessThan(topDecl);
+      }
+    }
+  });
+
+  it("a keyword-free line stays well below the weakest structural keyword", () => {
+    for (const name of LANGS) {
+      const lang = detectLanguage(name);
+      const minKeyword = Math.min(...Object.values(lang.structuralKeywords));
+      const deep = computeSignal([" ".repeat(64) + "zzz;"], lang)[0];
+      expect(deep, lang.name).toBeLessThan(minKeyword);
+    }
+  });
+
+  it("the same declaration scores lower as nesting deepens", () => {
+    const ts = detectLanguage("a.ts");
+    const scores = [0, 1, 2, 4, 8].map(
+      (d) => computeSignal([" ".repeat(d * 4) + "class Foo {"], ts)[0],
+    );
+    for (let i = 1; i < scores.length; i++) {
+      expect(scores[i]).toBeLessThan(scores[i - 1]);
+    }
+    // Attenuation is gradual — a deeply nested class is still a declaration.
+    expect(scores[scores.length - 1]).toBeGreaterThan(scores[0] * 0.3);
+  });
+
+  it("a nested declaration still outranks a shallower non-declaration", () => {
+    const ts = detectLanguage("a.ts");
+    const nestedDecl = computeSignal(["        class Foo {"], ts)[0];
+    const shallowFiller = computeSignal(["    zzz;"], ts)[0];
+    expect(nestedDecl).toBeGreaterThan(shallowFiller);
+  });
+
+  it("blank and comment lines remain exactly zero", () => {
+    for (const name of LANGS) {
+      const lang = detectLanguage(name);
+      const prefix = lang.commentPrefixes[0];
+      const signal = computeSignal(
+        ["", "      ", `${prefix} c`, `        ${prefix} c`],
+        lang,
+      );
+      expect(signal, lang.name).toEqual([0, 0, 0, 0]);
+    }
+  });
+
+  it("the keyword-less generic config still produces a non-zero code signal", () => {
+    const generic = detectLanguage("a.unknownext");
+    expect(generic.name).toBe("generic");
+    const signal = computeSignal(["alpha beta", "    gamma delta"], generic);
+    for (const s of signal) expect(s).toBeGreaterThan(0);
+  });
+});
+
+describe("peaks anchor on declarations, not nested statement bodies", () => {
+  it("ranks a top-level declaration above a deeply nested statement plateau", () => {
+    const ts = detectLanguage("a.ts");
+    // Mirrors the real shape in project.ts: a small declaration followed by
+    // a long, deeply indented plateau of ordinary statements.
+    const lines = ["export class Registry {"];
+    for (let i = 0; i < 30; i++) lines.push("          results.push(item);");
+    const signal = computeSignal(lines, ts);
+    for (let i = 1; i < signal.length; i++) {
+      expect(signal[i]).toBeLessThan(signal[0]);
+    }
+  });
+});
+
+describe("docstring bodies are prose, not code", () => {
+  const py = detectLanguage("a.py");
+
+  it("does not score keywords inside a single-line docstring", () => {
+    // Pre-fix these scored 1.10 and 2.00 — a prose line ranking at or above
+    // a real `class Foo:` declaration.
+    expect(computeSignal(['"""Returns a class"""'], py)[0]).toBe(0);
+    expect(
+      computeSignal(['"""Handle the class registry for each def"""'], py)[0],
+    ).toBe(0);
+  });
+
+  it("does not score keywords inside a multi-line docstring body", () => {
+    const lines = ['"""', "Handle the class registry.", "Each def is stored.", '"""'];
+    expect(computeSignal(lines, py)).toEqual([0, 0, 0, 0]);
+  });
+
+  it("still scores real code that follows a closing docstring on the same line", () => {
+    const signal = computeSignal(['"""doc""" class Foo:'], py);
+    expect(signal[0]).toBeGreaterThanOrEqual(1.0);
+  });
+
+  it("still scores real code that precedes an opening docstring", () => {
+    const signal = computeSignal(['class Foo: """doc'], py);
+    expect(signal[0]).toBeGreaterThanOrEqual(1.0);
+  });
+});
+
+describe("syntactic declaration detection for brace languages", () => {
+  const ts = detectLanguage("a.ts");
+  const js = detectLanguage("a.js");
+  const java = detectLanguage("a.java");
+  const generic = detectLanguage("a.cs");
+
+  const score = (line: string, lang = ts) => computeSignal([line], lang)[0];
+
+  describe("recognises declarations that carry no definition keyword", () => {
+    const DECLARATIONS: [string, ReturnType<typeof detectLanguage>][] = [
+      ["  add(item: string): void {", ts],
+      ["  async process(data) {", ts],
+      ["  get value() {", ts],
+      ["  set value(v) {", ts],
+      ["  constructor(private config: Config) {}", ts],
+      ["  private helper(x: number): string {", ts],
+      ["  static create(): Foo {", ts],
+      ["  handle(req, res) {", js],
+      ["    public List<String> scan() {", java],
+      ["    void helper() {", java],
+      ["    public Repo() {", java],
+      ["    protected <T> T map(T in) throws IOException {", java],
+      ["    public void Run() {", generic],
+    ];
+
+    for (const [line, lang] of DECLARATIONS) {
+      it(`scores as a declaration: ${line.trim()}`, () => {
+        // Pre-fix a keyword-less method scored 0.047 — below a plain field.
+        expect(score(line, lang)).toBeGreaterThan(0.6);
+      });
+    }
+
+    it("ranks a method above a field in the same class", () => {
+      expect(score("  add(item: string): void {")).toBeGreaterThan(
+        score("  private items: string[] = [];"),
+      );
+      expect(score("    void helper() {", java)).toBeGreaterThan(
+        score("    private String root;", java),
+      );
+    });
+
+    it("recognises an abstract or interface method ending in a semicolon", () => {
+      expect(score("    void scan();", java)).toBeGreaterThan(0.6);
+      expect(score("  abstract render(): void;", ts)).toBeGreaterThan(0.6);
+    });
+
+    it("recognises a signature whose parameter list opens on the next line", () => {
+      expect(score("  public static void main(", java)).toBeGreaterThan(0.6);
+    });
+  });
+
+  describe("does not mistake calls and control flow for declarations", () => {
+    const NOT_DECLARATIONS = [
+      "    this.items.push(item);",
+      "    results.push({",
+      "    console.log('processing');",
+      "    if (f == null) {",
+      "    for (const f of files) {",
+      "    while (cursor < pending.length) {",
+      "    switch (kind) {",
+      "    } catch (e) {",
+      "    } else if (ready) {",
+      "    do {",
+      "    return compute(a);",
+      "    throw new Error('x');",
+      "    doThing();",
+      "    super(a, b);",
+      "    const x = compute(a, b);",
+      "    this.value = make(a);",
+      "    describe('a group', () => {",
+      "    it('does a thing', async () => {",
+      "    useEffect(() => {",
+      "    new Thread(() -> {",
+      "    }).then(() => {",
+      "    await load(path);",
+    ];
+
+    for (const line of NOT_DECLARATIONS) {
+      it(`is not a declaration: ${line.trim()}`, () => {
+        expect(score(line)).toBeLessThan(0.6);
+      });
+    }
+  });
+
+  it("does not fire on a callback nested inside an argument list", () => {
+    // Tested in Java, where `function` is not a keyword, so the score
+    // reflects the syntactic detector alone. In TS/JS the same line is
+    // scored by the `function` keyword, which is correct on its own terms.
+    expect(score("    register(handle(a, b) {", java)).toBeLessThan(0.3);
+    expect(score("    schedule(task(a) {", java)).toBeLessThan(0.3);
+  });
+
+  describe("does not inflate lines that already declare via a keyword", () => {
+    it("leaves a top-level function at its keyword score", () => {
+      const withKeyword = score("export function foo() {");
+      const bare = score("function foo() {");
+      expect(withKeyword).toBeGreaterThan(bare);
+      // 0.6 export + 0.9 function + 0.05 base, not stacked with a bonus
+      expect(withKeyword).toBeCloseTo(1.55, 2);
+      expect(bare).toBeCloseTo(0.95, 2);
+    });
+
+    it("leaves languages with a definition keyword untouched", () => {
+      const py = detectLanguage("a.py");
+      const go = detectLanguage("a.go");
+      const clj = detectLanguage("a.clj");
+      expect(computeSignal(["def foo():"], py)[0]).toBeCloseTo(0.95, 2);
+      expect(computeSignal(["func main() {"], go)[0]).toBeCloseTo(0.95, 2);
+      expect(computeSignal(["(defn foo [] 1)"], clj)[0]).toBeCloseTo(0.95, 2);
+    });
+  });
+
+  describe("does not fire inside comments or strings", () => {
+    it("ignores a declaration written inside a comment", () => {
+      expect(computeSignal(["// void scan() {"], ts)[0]).toBe(0);
+      expect(computeSignal(["/* void scan() { */"], ts)[0]).toBe(0);
+    });
+
+    it("ignores a declaration written inside a string", () => {
+      expect(score('  const s = "void scan() {";')).toBeLessThan(0.6);
+    });
+  });
+});
+
+describe("configs only score keywords their language actually has", () => {
+  // The shared cLike/tsLike bases were spread wholesale into languages that
+  // lack many of those keywords, so an ordinary identifier scored as
+  // structure: Go rated `class` at 1.0, its highest weight, for a language
+  // with no classes, and Java rated `function` at 0.9.
+  const ALIEN: Record<string, string[]> = {
+    go: ["class", "export", "let", "async", "try", "catch", "finally", "while", "throw", "do"],
+    rust: ["class", "export"],
+    java: ["function", "let", "async", "export", "type"],
+    php: ["let", "async", "export"],
+    swift: ["export", "finally"],
+    kotlin: ["export", "switch", "case", "default", "static"],
+    scala: ["let", "async", "switch", "default", "static", "public"],
+  };
+
+  for (const [langName, alien] of Object.entries(ALIEN)) {
+    const cfg = configs.find((c) => c.name === langName)!;
+    it(`${langName} does not define keywords it lacks`, () => {
+      for (const word of alien) {
+        expect(Object.hasOwn(cfg.structuralKeywords, word), `${langName}.${word}`)
+          .toBe(false);
+      }
+    });
+
+    it(`${langName} scores those words as ordinary identifiers`, () => {
+      for (const word of alien) {
+        const score = computeSignal([`${word} = 1`], cfg)[0];
+        expect(score, `${langName}: ${word}`).toBeLessThan(0.3);
+      }
+    });
+  }
+
+  it("Go still scores its own keywords, including type and interface", () => {
+    const go = configs.find((c) => c.name === "go")!;
+    for (const [line, min] of [
+      ["type Repo struct {", 1.0],
+      ["type Scanner interface {", 1.0],
+      ["func main() {", 0.9],
+      ["package main", 0.3],
+      ["for i := range xs {", 0.3],
+    ] as const) {
+      expect(computeSignal([line], go)[0], line).toBeGreaterThanOrEqual(min);
+    }
+  });
+
+  it("keeps the keywords each language really has", () => {
+    const has = (name: string, words: string[]) => {
+      const cfg = configs.find((c) => c.name === name)!;
+      for (const w of words) {
+        expect(Object.hasOwn(cfg.structuralKeywords, w), `${name}.${w}`).toBe(true);
+      }
+    };
+    has("java", ["class", "interface", "enum", "package", "extends", "implements", "try", "catch"]);
+    has("go", ["func", "struct", "package", "import", "defer", "go"]);
+    has("rust", ["fn", "impl", "trait", "struct", "enum", "mod", "use"]);
+    has("php", ["function", "class", "interface", "trait", "namespace"]);
+    has("swift", ["func", "protocol", "extension", "struct", "class"]);
+    has("kotlin", ["fun", "class", "object", "val", "suspend"]);
+    has("scala", ["def", "trait", "object", "val", "case"]);
   });
 });

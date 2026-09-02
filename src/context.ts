@@ -46,6 +46,30 @@ export interface WaveletCoefficientsResult {
   clampedFrom?: { start: number; end: number };
 }
 
+/**
+ * Minimum distance getImportantPositions will search for a stronger line
+ * when a peak lands on a structurally empty one. Widened toward the peak's
+ * own scale, since a coarse peak summarizes a correspondingly wide region.
+ */
+const MIN_SNAP_RADIUS = 3;
+
+/**
+ * Ceiling on that search, so a peak at scale 128 cannot drag an anchor
+ * across half a file to an unrelated declaration.
+ */
+const MAX_SNAP_RADIUS = 8;
+
+/**
+ * Share of the strongest nearby signal a line must carry to count as an
+ * anchor. Being a local maximum is not enough on its own: in a valley of
+ * near-zero filler a lone `}` is the tallest thing around, and anchoring a
+ * coefficient built from two 1.7-strength declarations onto a 0.05 line
+ * misreports what the coefficient describes.
+ */
+const SNAP_MIN_SHARE = 0.5;
+
+
+
 /** Band scale ranges used by buildMediumBand / buildCoarseBand. */
 const BAND_SCALES = {
   fine: [1, 2] as const,
@@ -113,10 +137,24 @@ export class FileContext {
    * feature appearing at many scales yields one entry. Used by
    * getImportantPositions, which wants a deduplicated importance ranking
    * rather than the per-scale set band assembly needs.
+   *
+   * Positive-only: a negative coefficient marks a gap between structural
+   * lines rather than a structural line itself, so it is never a useful
+   * "jump here" target. Band assembly keeps both signs — see getAllPeaks.
+   *
+   * Cross-scale ridge collapse is disabled here because snapping already
+   * does it, and does it better. snapToStructure maps every peak onto a
+   * landmark and getImportantPositions dedupes by position keeping the
+   * largest coefficient, so one feature detected at eight scales still
+   * yields one entry. Collapsing first, on raw positions, additionally
+   * discarded peaks that would have snapped to *different* landmarks: a
+   * coefficient maximum falling between two declarations a couple of lines
+   * apart suppressed the peaks on the declarations themselves, and the
+   * pair reported as a single position.
    */
   private getRankedPeaks(): Peak[] {
     if (this._rankedPeaks) return this._rankedPeaks;
-    this._rankedPeaks = detectPeaks(this.coefficients, 0.0, 1000);
+    this._rankedPeaks = detectPeaks(this.coefficients, 0.0, 1000, -1, true);
     return this._rankedPeaks;
   }
 
@@ -131,13 +169,15 @@ export class FileContext {
     limit: number = 20,
   ): ImportantPosition[] {
     const allPeaks = this.getRankedPeaks();
-    // Deduplicate by position: keep the peak with the largest |coefficient|
+    // Snap first, then deduplicate by position keeping the largest
+    // |coefficient| — two peaks can snap onto the same code line.
     const bestMap = new Map<number, Peak>();
     for (const p of allPeaks) {
       if (Math.abs(p.coefficient) < minCoefficient) continue;
-      const existing = bestMap.get(p.position);
+      const position = this.snapToStructure(p.position, p.scale);
+      const existing = bestMap.get(position);
       if (!existing || Math.abs(p.coefficient) > Math.abs(existing.coefficient)) {
-        bestMap.set(p.position, p);
+        bestMap.set(position, position === p.position ? p : { ...p, position });
       }
     }
     return [...bestMap.values()]
@@ -342,6 +382,70 @@ export class FileContext {
 
   // ─── private helpers ──────────────────────────────────────
 
+  /**
+   * True when line `i` is a local maximum of the structural signal: a line
+   * that stands at least as tall as both neighbours. These are the lines
+   * worth navigating to — a declaration, a section header, the strongest
+   * statement in a block.
+   */
+  private isLandmark(i: number): boolean {
+    const v = this.signal[i] ?? 0;
+    if (v <= 0) return false;
+    const prev = i > 0 ? this.signal[i - 1] : -1;
+    const next = i < this.signal.length - 1 ? this.signal[i + 1] : -1;
+    return v >= prev && v >= next;
+  }
+
+  /**
+   * Move a peak onto the nearest landmark, preferring the line below when
+   * two sit equally close.
+   *
+   * A wavelet coefficient is an integral over a window, so its maximum
+   * sits wherever the surrounding structure balances — routinely between
+   * two declarations rather than on either. That centre is the right
+   * answer for summarizing a region and the wrong one for navigating to
+   * it: peaks landed on blank lines, on a lone `}`, and on `continue;`
+   * while the declarations a few lines away went unreported.
+   *
+   * Nearest, not strongest. Snapping to the strongest line within the
+   * radius drags every peak in a neighbourhood onto the one biggest
+   * declaration, and a whole file collapses to two or three positions.
+   * Walking outward and stopping at the first landmark keeps distinct
+   * peaks distinct. A peak with no landmark inside the radius stays put
+   * rather than being dragged to unrelated code.
+   */
+  private snapToStructure(pos: number, scale: number): number {
+    if (pos < 0 || pos >= this.lines.length) return pos;
+    const radius = Math.max(MIN_SNAP_RADIUS, Math.min(scale, MAX_SNAP_RADIUS));
+
+    const lo = Math.max(0, pos - radius);
+    const hi = Math.min(this.signal.length - 1, pos + radius);
+    let localBest = 0;
+    for (let i = lo; i <= hi; i++) {
+      if (this.signal[i] > localBest) localBest = this.signal[i];
+    }
+    const floor = localBest * SNAP_MIN_SHARE;
+
+    const qualifies = (i: number) =>
+      this.isLandmark(i) && this.signal[i] >= floor;
+
+    if (qualifies(pos)) return pos;
+    for (let d = 1; d <= radius; d++) {
+      let bestPos = -1;
+      // `pos + d` first so it wins a tie at equal distance: a gap usually
+      // precedes the definition it separates.
+      for (const cand of [pos + d, pos - d]) {
+        if (cand < 0 || cand >= this.lines.length) continue;
+        if (!qualifies(cand)) continue;
+        if (bestPos === -1 || this.signal[cand] > this.signal[bestPos]) {
+          bestPos = cand;
+        }
+      }
+      if (bestPos !== -1) return bestPos;
+    }
+    return pos;
+  }
+
   private dedupPeaks(peaks: Peak[]): Peak[] {
     const bestMap = new Map<number, Peak>();
     for (const p of peaks) {
@@ -377,6 +481,11 @@ export class FileContext {
     const tokens = line.split(/[\s()[\]{},;:'"`=<>+*/&|^~%@#\\]+/).filter(Boolean);
     // Also keep whitespace-split tokens as fallback for label reading
     const wsTokens = line.split(/\s+/);
+
+    if (this.language.name === "go") {
+      const goLabel = this.inferGoLabel(line);
+      if (goLabel) return goLabel;
+    }
 
     if (this.language.family === "lisp") {
       const lispLabel = this.inferLispLabel(line, tokens);
@@ -475,6 +584,27 @@ export class FileContext {
     }
 
     return line.substring(0, 50);
+  }
+
+  /**
+   * Go declares the name before the keyword (`type Repo struct {`) and puts
+   * a receiver between `func` and the method name (`func (r *Repo) Scan()`).
+   * The generic "name follows the keyword" rule read those as
+   * `struct undefined` and `func r`.
+   */
+  private inferGoLabel(line: string): string | null {
+    const method = line.match(
+      /^func\s*\(\s*\w+\s+\*?(\w+)\s*\)\s*(\w+)/,
+    );
+    if (method) return `func (${method[1]}) ${method[2]}`;
+
+    const typeDecl = line.match(/^type\s+(\w+)\s+(struct|interface)\b/);
+    if (typeDecl) return `${typeDecl[2]} ${typeDecl[1]}`;
+
+    const alias = line.match(/^type\s+(\w+)\b/);
+    if (alias) return `type ${alias[1]}`;
+
+    return null;
   }
 
   /**

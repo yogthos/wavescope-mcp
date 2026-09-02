@@ -431,3 +431,217 @@ describe("FileContext — CRLF line endings", () => {
     expect(fine).not.toContain("\r");
   });
 });
+
+describe("FileContext — important positions skip blank-line troughs", () => {
+  const scheme = `#lang racket
+(require racket/list)
+
+(define (make-stack) (stack '()))
+
+(define (push s x)
+  (set-stack-items! s (cons x (stack-items s))))
+
+(define (pop s)
+  (car (stack-items s)))
+
+(define-syntax-rule (swap! a b)
+  (let ([tmp a]) (set! a b) (set! b tmp)))
+`;
+
+  const typescript = `import { list } from "./list";
+
+export function makeStack() { return []; }
+
+export function push(s, x) { s.push(x); }
+
+export function pop(s) {
+  return s.pop();
+}
+
+export const swap = (a, b) => [b, a];
+`;
+
+  for (const [name, src] of [["stack.rkt", scheme], ["stack.ts", typescript]] as const) {
+    describe(name, () => {
+      const ctx = new FileContext(name, src);
+      const positions = ctx.getImportantPositions(0.2, 10);
+
+      it("returns at least one position", () => {
+        expect(positions.length).toBeGreaterThan(0);
+      });
+
+      it("never anchors a position on a blank line", () => {
+        for (const p of positions) {
+          expect(ctx.lines[p.position].trim()).not.toBe("");
+        }
+      });
+
+      it("returns only positive coefficients", () => {
+        for (const p of positions) {
+          expect(p.coefficient).toBeGreaterThan(0);
+        }
+      });
+
+      it("produces no generic 'line N' labels", () => {
+        for (const p of positions) {
+          expect(p.label).not.toMatch(/^line \d+$/);
+        }
+      });
+    });
+  }
+
+  it("still anchors on the real definition lines (Scheme)", () => {
+    const ctx = new FileContext("stack.rkt", scheme);
+    const labels = ctx.getImportantPositions(0.2, 10).map((p) => p.label);
+    expect(labels.some((l) => l.startsWith("define"))).toBe(true);
+  });
+});
+
+describe("FileContext — band assembly still uses both peak signs", () => {
+  const lines: string[] = [];
+  for (let i = 0; i < 200; i++) lines.push("");
+  for (const i of [20, 60, 100, 140]) lines[i] = `export function f${i}() {}`;
+  const ctx = new FileContext("wide.ts", lines.join("\n"));
+
+  it("getSummaryAtScale still summarizes a region containing troughs", () => {
+    const summary = ctx.getSummaryAtScale(0, 199);
+    expect(summary.length).toBeGreaterThan(0);
+  });
+
+  it("queryWaveletContext still returns coarse-band structure", () => {
+    const ctx2 = ctx.queryWaveletContext(100, 200);
+    expect(ctx2.bands.coarse.content.length).toBeGreaterThan(0);
+    expect(ctx2.bands.medium.content.length).toBeGreaterThan(0);
+  });
+});
+
+describe("FileContext — important positions prefer declarations over nested bodies", () => {
+  const src = [
+    "import { readFile } from 'fs';",
+    "",
+    "export class Registry {",
+    "  private items: string[] = [];",
+    "",
+    "  add(item: string): void {",
+    "    this.items.push(item);",
+    "  }",
+    "}",
+    "",
+    "export async function discover(root: string): Promise<string[]> {",
+    "  const results: string[] = [];",
+    "  async function worker() {",
+    "    while (cursor < pending.length) {",
+    "      const idx = cursor++;",
+    "      const { fullPath, mtimeMs } = pending[idx];",
+    "      if (await isBinary(fullPath)) continue;",
+    "      let content: string;",
+    "      try {",
+    "        content = await readFile(fullPath, 'utf8');",
+    "      } catch {",
+    "        continue;",
+    "      }",
+    "      results.push({",
+    "        filename: basename(fullPath),",
+    "        path: fullPath,",
+    "      });",
+    "    }",
+    "  }",
+    "  return results;",
+    "}",
+    "",
+    "export interface Options { root: string; }",
+  ].join("\n");
+
+  const ctx = new FileContext("registry.ts", src);
+  const positions = ctx.getImportantPositions(0.3, 6);
+
+  it("never anchors on a bare closing brace or loop-control statement", () => {
+    for (const p of positions) {
+      const text = ctx.lines[p.position].trim();
+      expect(text, `line ${p.position}`).not.toMatch(/^(\}|\{|continue;|break;|\);|\}\);)$/);
+    }
+  });
+
+  it("anchors every position on a landmark, never on filler", () => {
+    // The invariant snapToStructure establishes: a reported position is a
+    // local maximum of the signal and carries a meaningful share of the
+    // structure around it, never a filler line that merely sat at a
+    // wavelet's centre of mass.
+    for (const p of positions) {
+      const i = p.position;
+      const prev = i > 0 ? ctx.signal[i - 1] : -1;
+      const next = i < ctx.signal.length - 1 ? ctx.signal[i + 1] : -1;
+      expect(ctx.signal[i], `line ${i} is not a local max`).toBeGreaterThanOrEqual(prev);
+      expect(ctx.signal[i], `line ${i} is not a local max`).toBeGreaterThanOrEqual(next);
+      expect(ctx.signal[i], `line ${i} is filler`).toBeGreaterThan(0.1);
+    }
+  });
+
+  it("reports every top-level declaration in the file", () => {
+    const reported = new Set(positions.map((p) => p.position));
+    for (const line of [2, 10, 32]) {
+      expect(reported.has(line), `line ${line} missing`).toBe(true);
+    }
+  });
+});
+
+describe("FileContext — Go declaration labels", () => {
+  function labelFor(line: string): string | undefined {
+    const lines: string[] = [];
+    for (let i = 0; i < 41; i++) lines.push("// comment");
+    lines[20] = line;
+    const ctx = new FileContext("a.go", lines.join("\n"));
+    return ctx.getImportantPositions(0.0, 10).find((p) => p.position === 20)?.label;
+  }
+
+  it("labels a named struct type with its own name", () => {
+    // Go writes the name before the keyword; the generic "name follows the
+    // keyword" rule produced "struct undefined".
+    expect(labelFor("type Repo struct {")).toBe("struct Repo");
+  });
+
+  it("labels a named interface type with its own name", () => {
+    expect(labelFor("type Scanner interface {")).toBe("interface Scanner");
+  });
+
+  it("labels a method with its receiver type and name, not the receiver variable", () => {
+    // Produced "func r" — the receiver variable, not the method.
+    expect(labelFor("func (r *Repo) Scan() error {")).toBe("func (Repo) Scan");
+    expect(labelFor("func (r Repo) Close() {")).toBe("func (Repo) Close");
+  });
+
+  it("still labels a plain function with its name", () => {
+    expect(labelFor("func main() {")).toBe("func main");
+  });
+
+  it("still labels a type alias", () => {
+    expect(labelFor("type ID = string")).toBe("type ID");
+  });
+});
+
+describe("FileContext — adjacent declarations both report", () => {
+  it("reports two declarations that sit two lines apart", () => {
+    // The coefficient maximum falls between them; ridge collapse used to
+    // discard the peaks on the declarations themselves in favour of that
+    // between-peak, so the pair reported as a single position.
+    const src = [
+      "import { readFile } from 'fs';",
+      "",
+      "export async function discover(root: string): Promise<string[]> {",
+      "  const results: string[] = [];",
+      "  async function worker() {",
+      "    return results;",
+      "  }",
+      "  return results;",
+      "}",
+      "",
+      "export interface Options { root: string; }",
+    ].join("\n");
+    const ctx = new FileContext("adjacent.ts", src);
+    const reported = new Set(
+      ctx.getImportantPositions(0.3, 12).map((p) => p.position),
+    );
+    expect(reported.has(2), "outer function missing").toBe(true);
+    expect(reported.has(4), "inner function missing").toBe(true);
+  });
+});

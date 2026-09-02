@@ -12,6 +12,19 @@ export function rickerWavelet(t: number): number {
  * by half the signal length to keep the kernel finite on short inputs.
  * Includes 1/√a normalization to keep coefficient magnitudes comparable
  * across scales.
+ *
+ * The truncated kernel is then re-centred to zero mean. A wavelet has zero
+ * mean by definition — that is the admissibility condition, and it is what
+ * makes the transform respond to variation rather than to level. When the
+ * scale is large relative to the signal, the ±N/2 bound clips away the
+ * negative lobes and leaves only the positive centre, turning the kernel
+ * into a box filter with a large DC response: a constant signal, which has
+ * no structure at all, transformed to 6.53 at scale 128 over 200 samples.
+ * Since peaks are ranked by magnitude across scales, those DC-driven coarse
+ * coefficients outranked genuine fine-scale structure. Subtracting the mean
+ * restores zero mean at every scale and signal length; a scale too coarse to
+ * resolve anything in the signal now correctly returns near-zero instead of
+ * a large constant.
  */
 function makeKernel(a: number, numPoints: number): number[] {
   if (!Number.isFinite(a) || a <= 0) throw new Error(`Invalid scale: ${a}`);
@@ -19,9 +32,14 @@ function makeKernel(a: number, numPoints: number): number[] {
   const half = Math.min(halfWidth, Math.ceil(numPoints / 2));
   const invSqrtA = 1 / Math.sqrt(a);
   const kernel: number[] = [];
+  let sum = 0;
   for (let t = -half; t <= half; t++) {
-    kernel.push(invSqrtA * rickerWavelet(t / a));
+    const v = invSqrtA * rickerWavelet(t / a);
+    kernel.push(v);
+    sum += v;
   }
+  const mean = sum / kernel.length;
+  for (let i = 0; i < kernel.length; i++) kernel[i] -= mean;
   return kernel;
 }
 
@@ -124,12 +142,21 @@ export function computeCWT(
  * sorting, peaks whose position is within `ridgeWindow` of an already-kept
  * stronger peak are dropped, so a single spike yields one peak (the
  * dominant scale) rather than one per scale.
+ *
+ * `positiveOnly` keeps only peaks with a positive coefficient. The Ricker
+ * wavelet's negative lobes fall in the gaps *between* structural lines, so
+ * a negative peak marks the absence of structure — useful for band
+ * assembly, useless as a navigation target. The filter is applied when
+ * candidates are collected, before sorting and ridge collapse: filtering
+ * afterwards would let a stronger negative lobe collapse the adjacent
+ * positive peak out of the result entirely.
  */
 export function detectPeaks(
   cwt: WaveletCoefficients,
   threshold: number,
   maxPeaks: number = 250,
   ridgeWindow: number = 2,
+  positiveOnly: boolean = false,
 ): Peak[] {
   if (cwt.coefficients.length === 0) return [];
 
@@ -141,6 +168,7 @@ export function detectPeaks(
     const N = coeffs.length;
 
     for (let pos = 0; pos < N; pos++) {
+      if (positiveOnly && coeffs[pos] <= 0) continue;
       const mag = Math.abs(coeffs[pos]);
       if (mag < threshold) continue;
 
