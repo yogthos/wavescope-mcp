@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { readFileAtRef, findGitRoot } from "./git.js";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -79,5 +79,37 @@ describe("findGitRoot", () => {
   it("finds the repo root when passed the repo root directly", () => {
     const root = findGitRoot(repoRoot);
     expect(root).toBe(repoRoot);
+  });
+});
+
+describe("findGitRoot — stderr hygiene", () => {
+  it("probes for a repo without leaking git's error output to stderr", () => {
+    // findGitRoot deliberately probes two directories and swallows the
+    // failure, but execFileSync inherits stderr by default, so every probe
+    // outside a repository printed a raw "fatal: not a git repository" line.
+    // This is an MCP server whose stderr is the log channel, so those lines
+    // surfaced as spurious errors in user logs for any file outside a repo.
+    // Asserted in a child process because stderr is inherited at the fd
+    // level and cannot be intercepted from inside this one.
+    const script = [
+      `import { findGitRoot } from ${JSON.stringify(
+        new URL("./git.ts", import.meta.url).pathname,
+      )};`,
+      `try { findGitRoot("/"); } catch { /* expected outside a repo */ }`,
+    ].join("\n");
+
+    const child = spawnSync(
+      process.execPath,
+      ["--import", "tsx", "-e", script],
+      // cwd must be inside the project so `tsx` resolves. It does not
+      // affect the probe: findGitRoot passes an explicit cwd of "/" to git.
+      { encoding: "utf-8", cwd: resolve(__dirname, "..") },
+    );
+
+    expect(child.stderr).toBe("");
+  });
+
+  it("still throws when the path is not inside a repository", () => {
+    expect(() => findGitRoot("/")).toThrow(/Not a git repository/);
   });
 });

@@ -133,6 +133,13 @@ export function findGitRoot(startPath: string): string {
       return execFileSync("git", ["rev-parse", "--show-toplevel"], {
         cwd: dir,
         encoding: "utf-8",
+        // Discard git's stderr. Probing a directory that is not a
+        // repository is an expected step here, not a failure, but
+        // execFileSync inherits stderr by default, so each probe printed a
+        // raw "fatal: not a git repository" line. This server logs to
+        // stderr, so those lines read as real errors for any file outside
+        // a repository. The thrown Error below is the reported failure.
+        stdio: ["ignore", "pipe", "ignore"],
       }).trim();
     } catch {
       // Not a git repo at this level, try next

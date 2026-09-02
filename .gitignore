@@ -6,7 +6,9 @@ coverage/
 .idea/
 .vscode/
 .dirge/
+.beads/
 *.swp
 blog.md
+arxiv-paper.md
 package-lock.json
 yarn.lock
