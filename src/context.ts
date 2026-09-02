@@ -141,10 +141,20 @@ export class FileContext {
    * Positive-only: a negative coefficient marks a gap between structural
    * lines rather than a structural line itself, so it is never a useful
    * "jump here" target. Band assembly keeps both signs — see getAllPeaks.
+   *
+   * Cross-scale ridge collapse is disabled here because snapping already
+   * does it, and does it better. snapToStructure maps every peak onto a
+   * landmark and getImportantPositions dedupes by position keeping the
+   * largest coefficient, so one feature detected at eight scales still
+   * yields one entry. Collapsing first, on raw positions, additionally
+   * discarded peaks that would have snapped to *different* landmarks: a
+   * coefficient maximum falling between two declarations a couple of lines
+   * apart suppressed the peaks on the declarations themselves, and the
+   * pair reported as a single position.
    */
   private getRankedPeaks(): Peak[] {
     if (this._rankedPeaks) return this._rankedPeaks;
-    this._rankedPeaks = detectPeaks(this.coefficients, 0.0, 1000, 2, true);
+    this._rankedPeaks = detectPeaks(this.coefficients, 0.0, 1000, -1, true);
     return this._rankedPeaks;
   }
 

@@ -618,3 +618,30 @@ describe("FileContext — Go declaration labels", () => {
     expect(labelFor("type ID = string")).toBe("type ID");
   });
 });
+
+describe("FileContext — adjacent declarations both report", () => {
+  it("reports two declarations that sit two lines apart", () => {
+    // The coefficient maximum falls between them; ridge collapse used to
+    // discard the peaks on the declarations themselves in favour of that
+    // between-peak, so the pair reported as a single position.
+    const src = [
+      "import { readFile } from 'fs';",
+      "",
+      "export async function discover(root: string): Promise<string[]> {",
+      "  const results: string[] = [];",
+      "  async function worker() {",
+      "    return results;",
+      "  }",
+      "  return results;",
+      "}",
+      "",
+      "export interface Options { root: string; }",
+    ].join("\n");
+    const ctx = new FileContext("adjacent.ts", src);
+    const reported = new Set(
+      ctx.getImportantPositions(0.3, 12).map((p) => p.position),
+    );
+    expect(reported.has(2), "outer function missing").toBe(true);
+    expect(reported.has(4), "inner function missing").toBe(true);
+  });
+});

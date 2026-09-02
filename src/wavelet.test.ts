@@ -262,3 +262,48 @@ describe("detectPeaks — positiveOnly", () => {
     );
   });
 });
+
+describe("computeCWT — kernel stays zero-mean when truncated", () => {
+  // A wavelet has zero mean by definition, so a signal with no variation
+  // must transform to zero. Truncating the kernel to the signal length used
+  // to clip away the negative lobes, leaving a box filter with a large DC
+  // response: a flat signal produced 6.53 at scale 128 on 200 samples.
+  for (const N of [33, 60, 100, 200, 512]) {
+    it(`constant signal produces near-zero coefficients at every scale (N=${N})`, () => {
+      const flat = new Array(N).fill(0.5);
+      const result = computeCWT(flat);
+      for (let si = 0; si < result.scales.length; si++) {
+        const mid = result.coefficients[si][Math.floor(N / 2)];
+        expect(Math.abs(mid), `scale ${result.scales[si]}`).toBeLessThan(0.05);
+      }
+    });
+  }
+
+  it("holds for a non-zero constant at any offset", () => {
+    const flat = new Array(80).fill(2.0);
+    const result = computeCWT(flat);
+    for (let si = 0; si < result.scales.length; si++) {
+      for (const pos of [20, 40, 60]) {
+        expect(Math.abs(result.coefficients[si][pos])).toBeLessThan(0.2);
+      }
+    }
+  });
+
+  it("still responds to a real spike at coarse scales", () => {
+    // The fix must not flatten genuine structure into nothing.
+    const signal = new Array(200).fill(0);
+    signal[100] = 1.0;
+    const result = computeCWT(signal, [32, 64]);
+    for (let si = 0; si < result.scales.length; si++) {
+      expect(Math.abs(result.coefficients[si][100])).toBeGreaterThan(0.01);
+    }
+  });
+
+  it("still separates a step change from a flat region", () => {
+    const signal = [...new Array(100).fill(0), ...new Array(100).fill(1)];
+    const result = computeCWT(signal, [16]);
+    const atStep = Math.abs(result.coefficients[0][100]);
+    const inFlat = Math.abs(result.coefficients[0][40]);
+    expect(atStep).toBeGreaterThan(inFlat);
+  });
+});
