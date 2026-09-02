@@ -49,6 +49,15 @@ export interface LanguageConfig {
    * generic `(def* name ...)` / `(define* name ...)` labelling rule.
    */
   family?: "lisp";
+  /**
+   * Score floor for a function or method declaration recognised by syntax
+   * rather than by keyword — `name(params) { ... }`. Set it for brace
+   * languages where a method needs no definition keyword (Java, C#, C,
+   * C++) or where a class method omits one (TypeScript, JavaScript).
+   * Leave unset for languages whose definitions always carry a keyword
+   * (`def`, `func`, `fn`, `defn`, `define`), where it would be a no-op.
+   */
+  declarationWeight?: number;
 }
 
 // ─── Base keyword sets ───────────────────────────────────────
@@ -139,6 +148,8 @@ const tsConfig: LanguageConfig = {
   blockCommentEnd: "*/",
   indentWeight: 0.15,
   decoratorWeight: 0.5,
+  // Methods here need no definition keyword; see declarationWeight.
+  declarationWeight: 0.85,
 };
 
 const jsConfig: LanguageConfig = {
@@ -154,6 +165,8 @@ const jsConfig: LanguageConfig = {
   blockCommentEnd: "*/",
   indentWeight: 0.15,
   decoratorWeight: 0.5,
+  // Methods here need no definition keyword; see declarationWeight.
+  declarationWeight: 0.85,
 };
 
 const goConfig: LanguageConfig = {
@@ -225,6 +238,8 @@ const javaConfig: LanguageConfig = {
   blockCommentEnd: "*/",
   indentWeight: 0.15,
   decoratorWeight: 0.5,
+  // Methods here need no definition keyword; see declarationWeight.
+  declarationWeight: 0.85,
 };
 
 const rubyConfig: LanguageConfig = {
@@ -642,6 +657,8 @@ const genericConfig: LanguageConfig = {
   blockCommentEnd: "*/",
   indentWeight: 0.1,
   decoratorWeight: 0.3,
+  // Methods here need no definition keyword; see declarationWeight.
+  declarationWeight: 0.85,
 };
 
 // Ordered by priority — genericConfig (last) is the fallback.

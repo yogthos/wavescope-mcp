@@ -769,3 +769,127 @@ describe("docstring bodies are prose, not code", () => {
     expect(signal[0]).toBeGreaterThanOrEqual(1.0);
   });
 });
+
+describe("syntactic declaration detection for brace languages", () => {
+  const ts = detectLanguage("a.ts");
+  const js = detectLanguage("a.js");
+  const java = detectLanguage("a.java");
+  const generic = detectLanguage("a.cs");
+
+  const score = (line: string, lang = ts) => computeSignal([line], lang)[0];
+
+  describe("recognises declarations that carry no definition keyword", () => {
+    const DECLARATIONS: [string, ReturnType<typeof detectLanguage>][] = [
+      ["  add(item: string): void {", ts],
+      ["  async process(data) {", ts],
+      ["  get value() {", ts],
+      ["  set value(v) {", ts],
+      ["  constructor(private config: Config) {}", ts],
+      ["  private helper(x: number): string {", ts],
+      ["  static create(): Foo {", ts],
+      ["  handle(req, res) {", js],
+      ["    public List<String> scan() {", java],
+      ["    void helper() {", java],
+      ["    public Repo() {", java],
+      ["    protected <T> T map(T in) throws IOException {", java],
+      ["    public void Run() {", generic],
+    ];
+
+    for (const [line, lang] of DECLARATIONS) {
+      it(`scores as a declaration: ${line.trim()}`, () => {
+        // Pre-fix a keyword-less method scored 0.047 — below a plain field.
+        expect(score(line, lang)).toBeGreaterThan(0.6);
+      });
+    }
+
+    it("ranks a method above a field in the same class", () => {
+      expect(score("  add(item: string): void {")).toBeGreaterThan(
+        score("  private items: string[] = [];"),
+      );
+      expect(score("    void helper() {", java)).toBeGreaterThan(
+        score("    private String root;", java),
+      );
+    });
+
+    it("recognises an abstract or interface method ending in a semicolon", () => {
+      expect(score("    void scan();", java)).toBeGreaterThan(0.6);
+      expect(score("  abstract render(): void;", ts)).toBeGreaterThan(0.6);
+    });
+
+    it("recognises a signature whose parameter list opens on the next line", () => {
+      expect(score("  public static void main(", java)).toBeGreaterThan(0.6);
+    });
+  });
+
+  describe("does not mistake calls and control flow for declarations", () => {
+    const NOT_DECLARATIONS = [
+      "    this.items.push(item);",
+      "    results.push({",
+      "    console.log('processing');",
+      "    if (f == null) {",
+      "    for (const f of files) {",
+      "    while (cursor < pending.length) {",
+      "    switch (kind) {",
+      "    } catch (e) {",
+      "    } else if (ready) {",
+      "    do {",
+      "    return compute(a);",
+      "    throw new Error('x');",
+      "    doThing();",
+      "    super(a, b);",
+      "    const x = compute(a, b);",
+      "    this.value = make(a);",
+      "    describe('a group', () => {",
+      "    it('does a thing', async () => {",
+      "    useEffect(() => {",
+      "    new Thread(() -> {",
+      "    }).then(() => {",
+      "    await load(path);",
+    ];
+
+    for (const line of NOT_DECLARATIONS) {
+      it(`is not a declaration: ${line.trim()}`, () => {
+        expect(score(line)).toBeLessThan(0.6);
+      });
+    }
+  });
+
+  it("does not fire on a callback nested inside an argument list", () => {
+    // Tested in Java, where `function` is not a keyword, so the score
+    // reflects the syntactic detector alone. In TS/JS the same line is
+    // scored by the `function` keyword, which is correct on its own terms.
+    expect(score("    register(handle(a, b) {", java)).toBeLessThan(0.3);
+    expect(score("    schedule(task(a) {", java)).toBeLessThan(0.3);
+  });
+
+  describe("does not inflate lines that already declare via a keyword", () => {
+    it("leaves a top-level function at its keyword score", () => {
+      const withKeyword = score("export function foo() {");
+      const bare = score("function foo() {");
+      expect(withKeyword).toBeGreaterThan(bare);
+      // 0.6 export + 0.9 function + 0.05 base, not stacked with a bonus
+      expect(withKeyword).toBeCloseTo(1.55, 2);
+      expect(bare).toBeCloseTo(0.95, 2);
+    });
+
+    it("leaves languages with a definition keyword untouched", () => {
+      const py = detectLanguage("a.py");
+      const go = detectLanguage("a.go");
+      const clj = detectLanguage("a.clj");
+      expect(computeSignal(["def foo():"], py)[0]).toBeCloseTo(0.95, 2);
+      expect(computeSignal(["func main() {"], go)[0]).toBeCloseTo(0.95, 2);
+      expect(computeSignal(["(defn foo [] 1)"], clj)[0]).toBeCloseTo(0.95, 2);
+    });
+  });
+
+  describe("does not fire inside comments or strings", () => {
+    it("ignores a declaration written inside a comment", () => {
+      expect(computeSignal(["// void scan() {"], ts)[0]).toBe(0);
+      expect(computeSignal(["/* void scan() { */"], ts)[0]).toBe(0);
+    });
+
+    it("ignores a declaration written inside a string", () => {
+      expect(score('  const s = "void scan() {";')).toBeLessThan(0.6);
+    });
+  });
+});
