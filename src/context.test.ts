@@ -431,3 +431,86 @@ describe("FileContext — CRLF line endings", () => {
     expect(fine).not.toContain("\r");
   });
 });
+
+describe("FileContext — important positions skip blank-line troughs", () => {
+  const scheme = `#lang racket
+(require racket/list)
+
+(define (make-stack) (stack '()))
+
+(define (push s x)
+  (set-stack-items! s (cons x (stack-items s))))
+
+(define (pop s)
+  (car (stack-items s)))
+
+(define-syntax-rule (swap! a b)
+  (let ([tmp a]) (set! a b) (set! b tmp)))
+`;
+
+  const typescript = `import { list } from "./list";
+
+export function makeStack() { return []; }
+
+export function push(s, x) { s.push(x); }
+
+export function pop(s) {
+  return s.pop();
+}
+
+export const swap = (a, b) => [b, a];
+`;
+
+  for (const [name, src] of [["stack.rkt", scheme], ["stack.ts", typescript]] as const) {
+    describe(name, () => {
+      const ctx = new FileContext(name, src);
+      const positions = ctx.getImportantPositions(0.2, 10);
+
+      it("returns at least one position", () => {
+        expect(positions.length).toBeGreaterThan(0);
+      });
+
+      it("never anchors a position on a blank line", () => {
+        for (const p of positions) {
+          expect(ctx.lines[p.position].trim()).not.toBe("");
+        }
+      });
+
+      it("returns only positive coefficients", () => {
+        for (const p of positions) {
+          expect(p.coefficient).toBeGreaterThan(0);
+        }
+      });
+
+      it("produces no generic 'line N' labels", () => {
+        for (const p of positions) {
+          expect(p.label).not.toMatch(/^line \d+$/);
+        }
+      });
+    });
+  }
+
+  it("still anchors on the real definition lines (Scheme)", () => {
+    const ctx = new FileContext("stack.rkt", scheme);
+    const labels = ctx.getImportantPositions(0.2, 10).map((p) => p.label);
+    expect(labels.some((l) => l.startsWith("define"))).toBe(true);
+  });
+});
+
+describe("FileContext — band assembly still uses both peak signs", () => {
+  const lines: string[] = [];
+  for (let i = 0; i < 200; i++) lines.push("");
+  for (const i of [20, 60, 100, 140]) lines[i] = `export function f${i}() {}`;
+  const ctx = new FileContext("wide.ts", lines.join("\n"));
+
+  it("getSummaryAtScale still summarizes a region containing troughs", () => {
+    const summary = ctx.getSummaryAtScale(0, 199);
+    expect(summary.length).toBeGreaterThan(0);
+  });
+
+  it("queryWaveletContext still returns coarse-band structure", () => {
+    const ctx2 = ctx.queryWaveletContext(100, 200);
+    expect(ctx2.bands.coarse.content.length).toBeGreaterThan(0);
+    expect(ctx2.bands.medium.content.length).toBeGreaterThan(0);
+  });
+});

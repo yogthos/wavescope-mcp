@@ -124,12 +124,21 @@ export function computeCWT(
  * sorting, peaks whose position is within `ridgeWindow` of an already-kept
  * stronger peak are dropped, so a single spike yields one peak (the
  * dominant scale) rather than one per scale.
+ *
+ * `positiveOnly` keeps only peaks with a positive coefficient. The Ricker
+ * wavelet's negative lobes fall in the gaps *between* structural lines, so
+ * a negative peak marks the absence of structure — useful for band
+ * assembly, useless as a navigation target. The filter is applied when
+ * candidates are collected, before sorting and ridge collapse: filtering
+ * afterwards would let a stronger negative lobe collapse the adjacent
+ * positive peak out of the result entirely.
  */
 export function detectPeaks(
   cwt: WaveletCoefficients,
   threshold: number,
   maxPeaks: number = 250,
   ridgeWindow: number = 2,
+  positiveOnly: boolean = false,
 ): Peak[] {
   if (cwt.coefficients.length === 0) return [];
 
@@ -141,6 +150,7 @@ export function detectPeaks(
     const N = coeffs.length;
 
     for (let pos = 0; pos < N; pos++) {
+      if (positiveOnly && coeffs[pos] <= 0) continue;
       const mag = Math.abs(coeffs[pos]);
       if (mag < threshold) continue;
 

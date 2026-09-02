@@ -46,6 +46,13 @@ export interface WaveletCoefficientsResult {
   clampedFrom?: { start: number; end: number };
 }
 
+/**
+ * How far getImportantPositions will look for a line with content when a
+ * peak lands on a blank line. Ordinary gaps between top-level forms are
+ * one or two blank lines.
+ */
+const SNAP_RADIUS = 3;
+
 /** Band scale ranges used by buildMediumBand / buildCoarseBand. */
 const BAND_SCALES = {
   fine: [1, 2] as const,
@@ -113,10 +120,14 @@ export class FileContext {
    * feature appearing at many scales yields one entry. Used by
    * getImportantPositions, which wants a deduplicated importance ranking
    * rather than the per-scale set band assembly needs.
+   *
+   * Positive-only: a negative coefficient marks a gap between structural
+   * lines rather than a structural line itself, so it is never a useful
+   * "jump here" target. Band assembly keeps both signs — see getAllPeaks.
    */
   private getRankedPeaks(): Peak[] {
     if (this._rankedPeaks) return this._rankedPeaks;
-    this._rankedPeaks = detectPeaks(this.coefficients, 0.0, 1000);
+    this._rankedPeaks = detectPeaks(this.coefficients, 0.0, 1000, 2, true);
     return this._rankedPeaks;
   }
 
@@ -131,13 +142,15 @@ export class FileContext {
     limit: number = 20,
   ): ImportantPosition[] {
     const allPeaks = this.getRankedPeaks();
-    // Deduplicate by position: keep the peak with the largest |coefficient|
+    // Snap first, then deduplicate by position keeping the largest
+    // |coefficient| — two peaks can snap onto the same code line.
     const bestMap = new Map<number, Peak>();
     for (const p of allPeaks) {
       if (Math.abs(p.coefficient) < minCoefficient) continue;
-      const existing = bestMap.get(p.position);
+      const position = this.snapToCode(p.position);
+      const existing = bestMap.get(position);
       if (!existing || Math.abs(p.coefficient) > Math.abs(existing.coefficient)) {
-        bestMap.set(p.position, p);
+        bestMap.set(position, position === p.position ? p : { ...p, position });
       }
     }
     return [...bestMap.values()]
@@ -341,6 +354,30 @@ export class FileContext {
   }
 
   // ─── private helpers ──────────────────────────────────────
+
+  /**
+   * Move a peak that landed on a blank line to the nearest line with
+   * content, preferring the line below on a tie (a gap usually precedes
+   * the definition it separates).
+   *
+   * At coarse scales the wavelet's positive centre lobe spans several
+   * lines, so a peak summarizing two adjacent definitions can be centred
+   * on the blank line between them. That position is a correct summary
+   * centre but a useless navigation target. The search is bounded: a peak
+   * with no code within SNAP_RADIUS sits in a genuine void and is left
+   * where it is rather than dragged to unrelated code.
+   */
+  private snapToCode(pos: number): number {
+    if (pos < 0 || pos >= this.lines.length) return pos;
+    if (this.lines[pos].trim() !== "") return pos;
+    for (let d = 1; d <= SNAP_RADIUS; d++) {
+      const below = pos + d;
+      if (below < this.lines.length && this.lines[below].trim() !== "") return below;
+      const above = pos - d;
+      if (above >= 0 && this.lines[above].trim() !== "") return above;
+    }
+    return pos;
+  }
 
   private dedupPeaks(peaks: Peak[]): Peak[] {
     const bestMap = new Map<number, Peak>();

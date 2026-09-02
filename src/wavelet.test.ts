@@ -222,3 +222,43 @@ describe("detectPeaks — disable collapse (ridgeWindow < 0)", () => {
     expect(new Set(nearAll.map((p) => p.scale)).size).toBeGreaterThan(1);
   });
 });
+
+describe("detectPeaks — positiveOnly", () => {
+  it("returns only positive-coefficient peaks when enabled", () => {
+    const signal = new Array(200).fill(0);
+    signal[50] = 1.0;
+    signal[120] = 2.0;
+
+    const result = computeCWT(signal, [1, 2, 4, 8, 16, 32]);
+    const all = detectPeaks(result, 0.1, 1000, 2, false);
+    const positive = detectPeaks(result, 0.1, 1000, 2, true);
+
+    expect(all.some((p) => p.coefficient < 0)).toBe(true);
+    expect(positive.every((p) => p.coefficient > 0)).toBe(true);
+    expect(positive.length).toBeGreaterThan(0);
+  });
+
+  it("filters before ridge collapse so a positive peak is not suppressed by a stronger adjacent negative one", () => {
+    // A lone spike: the Ricker negative lobes flank the positive centre
+    // closely at fine scales. Post-filtering would let a stronger negative
+    // lobe ridge-collapse the positive peak out of existence.
+    const signal = new Array(200).fill(0);
+    signal[100] = 1.0;
+
+    const positive = detectPeaks(result(signal), 0.05, 1000, 8, true);
+    expect(positive.some((p) => Math.abs(p.position - 100) <= 2)).toBe(true);
+
+    function result(s: number[]) {
+      return computeCWT(s, [1, 2, 4, 8, 16, 32, 64, 128]);
+    }
+  });
+
+  it("defaults to keeping negative peaks", () => {
+    const signal = new Array(200).fill(0);
+    signal[100] = 1.0;
+    const result = computeCWT(signal, [1, 2, 4, 8, 16, 32]);
+    expect(detectPeaks(result, 0.1, 1000, -1)).toEqual(
+      detectPeaks(result, 0.1, 1000, -1, false),
+    );
+  });
+});
