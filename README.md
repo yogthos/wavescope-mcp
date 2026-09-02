@@ -266,7 +266,13 @@ For a manual build, run `pnpm build`.
 Python (`.py`, `.pyi`, `.pyx`), TypeScript (`.ts`, `.tsx`, `.mts`, `.cts`),
 JavaScript (`.js`, `.jsx`, `.mjs`, `.cjs`), Go, Rust, Java, Ruby (incl.
 `Rakefile`, `Gemfile`), PHP, Swift, Kotlin, Scala, Clojure (`.clj`, `.cljs`,
-`.cljc`, `.edn`).
+`.cljc`, `.edn`), Scheme and Racket (`.scm`, `.ss`, `.sld`, `.sls`, `.sps`,
+`.rkt`), Common Lisp (`.lisp`, `.lsp`, `.cl`, `.asd`), Emacs Lisp (`.el`).
+
+The Lisp-family configs share reader conventions: `;` line comments,
+`#| ... |#` nested block comments (Scheme / Common Lisp), Clojure
+`(comment ...)` forms, `'`/backtick treated as quote rather than string
+delimiters, and `\x` / `#\x` / `?\x` character literals.
 
 Single-file tools (`query_wavelet_context`, `get_important_positions` with
 `file`, `get_summary_at_scale`, etc.) fall back to a minimal generic

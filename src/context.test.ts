@@ -377,3 +377,57 @@ describe("FileContext — inferLabel keeps hyphenated identifiers (Round 4)", ()
     expect(labels.some((l) => l === "defn foo-bar")).toBe(true);
   });
 });
+
+describe("FileContext — Lisp-family labels", () => {
+  function labelFor(filename: string, line: string): string | undefined {
+    // Isolate the form among comment lines so it is the dominant peak.
+    const lines: string[] = [];
+    for (let i = 0; i < 41; i++) lines.push("; comment");
+    lines[20] = line;
+    const ctx = new FileContext(filename, lines.join("\n"));
+    return ctx.getImportantPositions(0.0, 10).find((p) => p.position === 20)?.label;
+  }
+
+  it("labels a Scheme define with the defined name", () => {
+    expect(labelFor("a.scm", "(define (square x) (* x x))")).toBe("define square");
+  });
+
+  it("labels a Scheme define-record-type", () => {
+    expect(labelFor("a.scm", "(define-record-type point (make-point x y) point?)"))
+      .toBe("define-record-type point");
+  });
+
+  it("labels a Common Lisp defun and defclass", () => {
+    expect(labelFor("a.lisp", "(defun square (x) (* x x))")).toBe("defun square");
+    expect(labelFor("a.lisp", "(defclass point () ((x) (y)))")).toBe("defclass point");
+  });
+
+  it("labels an Emacs Lisp define-minor-mode with its hyphenated name", () => {
+    expect(labelFor("init.el", "(define-minor-mode my-cool-mode \"doc\")"))
+      .toBe("define-minor-mode my-cool-mode");
+  });
+
+  it("labels Clojure defmulti/defmethod/defonce (previously fell back to raw line)", () => {
+    expect(labelFor("a.clj", "(defmulti area :shape)")).toBe("defmulti area");
+    expect(labelFor("a.clj", "(defmethod area :circle [c] 1)")).toBe("defmethod area");
+    expect(labelFor("a.clj", "(defonce server (start))")).toBe("defonce server");
+  });
+
+  it("labels a Clojure ns form", () => {
+    expect(labelFor("a.clj", "(ns my.app.core (:require [x]))")).toBe("ns my.app.core");
+  });
+
+  it("keeps the raw #lang line for Racket module headers", () => {
+    expect(labelFor("a.rkt", "#lang racket")).toBe("#lang racket");
+  });
+});
+
+describe("FileContext — CRLF line endings", () => {
+  it("strips \\r so band content and labels are clean", () => {
+    const ctx = new FileContext("a.ts", "export class Foo {}\r\nconst x = 1;\r\n");
+    expect(ctx.lineCount).toBe(2);
+    expect(ctx.lines[0]).toBe("export class Foo {}");
+    const fine = ctx.queryWaveletContext(0, 10).bands.fine.content;
+    expect(fine).not.toContain("\r");
+  });
+});

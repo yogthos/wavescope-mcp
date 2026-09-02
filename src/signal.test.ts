@@ -399,3 +399,257 @@ describe("computeSignal", () => {
     });
   });
 });
+
+describe("block comment / docstring terminators are not hidden by string masking", () => {
+  const tsLang = detectLanguage("test.ts");
+  const pyLang = detectLanguage("test.py");
+
+  it("closes a single-line block comment containing an apostrophe (TS)", () => {
+    const lines = [
+      "/** Returns the user's name */",
+      "export class Foo {}",
+      "function bar() {}",
+    ];
+    const signal = computeSignal(lines, tsLang);
+    expect(signal[0]).toBe(0);
+    expect(signal[1]).toBeGreaterThanOrEqual(1.0);
+    expect(signal[2]).toBeGreaterThanOrEqual(0.9);
+  });
+
+  it("closes an inline block comment containing an apostrophe (TS)", () => {
+    const lines = ["foo(); /* it's */ bar();", "export class Foo {}"];
+    const signal = computeSignal(lines, tsLang);
+    expect(signal[1]).toBeGreaterThanOrEqual(1.0);
+  });
+
+  it("closes a multi-line block comment whose last line has an apostrophe (TS)", () => {
+    const lines = ["/*", " * don't */", "export class Foo {}"];
+    const signal = computeSignal(lines, tsLang);
+    expect(signal[0]).toBe(0);
+    expect(signal[1]).toBe(0);
+    expect(signal[2]).toBeGreaterThanOrEqual(1.0);
+  });
+
+  it("closes a multi-line docstring whose last line has an apostrophe (Python)", () => {
+    const lines = [
+      "def f():",
+      '    """',
+      "    Don't.\"\"\"",
+      "    return 1",
+      "class X: pass",
+    ];
+    const signal = computeSignal(lines, pyLang);
+    expect(signal[1]).toBe(0);
+    expect(signal[2]).toBe(0);
+    expect(signal[3]).toBeGreaterThan(0);
+    expect(signal[4]).toBeGreaterThanOrEqual(1.0);
+  });
+
+  it("still scores code after the closing delimiter on the same line", () => {
+    const lines = ["/* it's */ export class Foo {}"];
+    const signal = computeSignal(lines, tsLang);
+    expect(signal[0]).toBeGreaterThanOrEqual(1.0);
+  });
+});
+
+describe("inline comment stripping picks the earliest prefix", () => {
+  it("does not score keywords inside a PHP # comment that also contains //", () => {
+    const phpLang = detectLanguage("test.php");
+    const signal = computeSignal(["$x = 1; # class // foo"], phpLang);
+    expect(signal[0]).toBeLessThan(0.5);
+  });
+});
+
+describe("Clojure reader syntax", () => {
+  const cljLang = detectLanguage("test.clj");
+
+  it("does not treat syntax-quote backtick as a string delimiter", () => {
+    const signal = computeSignal(
+      ["(defmacro m [x] `(let [y# ~x] (defn z [] y#)))"],
+      cljLang,
+    );
+    // defmacro (0.9) + let (0.2) + defn (0.9) → capped at 2.0
+    expect(signal[0]).toBeGreaterThanOrEqual(1.5);
+  });
+
+  it("does not open a string at the \\\" character literal", () => {
+    const signal = computeSignal(
+      ['(defn f [] (str \\" (defn g [] 1)))'],
+      cljLang,
+    );
+    expect(signal[0]).toBeGreaterThanOrEqual(1.5);
+  });
+
+  it("does not start a comment at the \\; character literal", () => {
+    const signal = computeSignal(["(def sep \\;) (defn g [] 1)"], cljLang);
+    expect(signal[0]).toBeGreaterThanOrEqual(1.5);
+  });
+
+  it("does not treat (commentary ...) as a (comment ...) form", () => {
+    const signal = computeSignal(["(commentary 1)", "(defn foo [] 1)"], cljLang);
+    expect(signal[1]).toBeGreaterThanOrEqual(0.9);
+  });
+
+  it("ignores \\( and \\) character literals when tracking (comment ...) depth", () => {
+    const lines = ["(comment (str \\())", "(defn foo [] 1)"];
+    const signal = computeSignal(lines, cljLang);
+    expect(signal[0]).toBe(0);
+    expect(signal[1]).toBeGreaterThanOrEqual(0.9);
+  });
+});
+
+describe("Scheme", () => {
+  const scm = detectLanguage("test.scm");
+
+  it("is detected from Scheme and Racket extensions", () => {
+    for (const ext of [".scm", ".ss", ".sld", ".sls", ".sps", ".rkt"]) {
+      expect(detectLanguage(`foo${ext}`).name).toBe("scheme");
+    }
+  });
+
+  it("scores definition forms highly", () => {
+    const lines = [
+      "(define (square x) (* x x))",
+      "(define-syntax swap! (syntax-rules () ((_ a b) (let ((tmp a)) (set! a b) (set! b tmp)))))",
+      "(define-record-type point (make-point x y) point? (x point-x) (y point-y))",
+      "(define-values (q r) (floor/ 7 2))",
+      "(struct posn (x y))",
+      "(define-library (my lib) (export f) (import (scheme base)))",
+    ];
+    const signal = computeSignal(lines, scm);
+    for (const s of signal) expect(s).toBeGreaterThanOrEqual(0.7);
+  });
+
+  it("treats ; as a line comment and #| |# as a block comment", () => {
+    const lines = [
+      "; a comment",
+      "#| block",
+      "   comment |#",
+      "(define x 1)",
+    ];
+    const signal = computeSignal(lines, scm);
+    expect(signal[0]).toBe(0);
+    expect(signal[1]).toBe(0);
+    expect(signal[2]).toBe(0);
+    expect(signal[3]).toBeGreaterThanOrEqual(0.9);
+  });
+
+  it("handles nested #| |# block comments", () => {
+    const lines = [
+      "#| outer #| inner |# still comment",
+      "(define hidden 1) |#",
+      "(define visible 1)",
+    ];
+    const signal = computeSignal(lines, scm);
+    expect(signal[0]).toBe(0);
+    expect(signal[1]).toBe(0);
+    expect(signal[2]).toBeGreaterThanOrEqual(0.9);
+  });
+
+  it("does not treat quote or quasiquote as string delimiters", () => {
+    const signal = computeSignal(
+      ["(define xs '(a b)) (define ys `(c ,d)) (define z 1)"],
+      scm,
+    );
+    // three defines → 2.7, capped at 2.0
+    expect(signal[0]).toBe(2.0);
+  });
+
+  it("does not open a string at the #\\\" character literal", () => {
+    const signal = computeSignal(['(define q #\\") (define z 1)'], scm);
+    expect(signal[0]).toBeGreaterThanOrEqual(1.8);
+  });
+
+  it("scores #lang as a module header", () => {
+    const signal = computeSignal(["#lang racket"], scm);
+    expect(signal[0]).toBeGreaterThan(0.3);
+  });
+});
+
+describe("Common Lisp", () => {
+  const lisp = detectLanguage("test.lisp");
+
+  it("is detected from Common Lisp extensions", () => {
+    for (const ext of [".lisp", ".lsp", ".cl", ".asd"]) {
+      expect(detectLanguage(`foo${ext}`).name).toBe("lisp");
+    }
+  });
+
+  it("scores definition forms highly", () => {
+    const lines = [
+      "(defun square (x) (* x x))",
+      "(defmacro with-foo (&body body) `(progn ,@body))",
+      "(defclass point () ((x :accessor point-x) (y :accessor point-y)))",
+      "(defstruct node value next)",
+      "(defgeneric area (shape))",
+      "(defmethod area ((c circle)) (* pi (circle-r c) (circle-r c)))",
+      "(defpackage :my-app (:use :cl))",
+      "(defvar *counter* 0)",
+      "(define-condition my-error (error) ())",
+    ];
+    const signal = computeSignal(lines, lisp);
+    for (const s of signal) expect(s).toBeGreaterThanOrEqual(0.6);
+  });
+
+  it("treats ; as a line comment and #| |# as a nested block comment", () => {
+    const lines = [
+      ";;; header",
+      "#| outer #| inner |# tail",
+      "(defun hidden () 1) |#",
+      "(defun visible () 1)",
+    ];
+    const signal = computeSignal(lines, lisp);
+    expect(signal[0]).toBe(0);
+    expect(signal[1]).toBe(0);
+    expect(signal[2]).toBe(0);
+    expect(signal[3]).toBeGreaterThanOrEqual(0.9);
+  });
+
+  it("does not treat quote as a string delimiter", () => {
+    const signal = computeSignal(["(defvar *xs* '(a b)) (defun f () 1)"], lisp);
+    // defvar (0.7) + defun (0.9)
+    expect(signal[0]).toBeGreaterThanOrEqual(1.5);
+  });
+});
+
+describe("Emacs Lisp", () => {
+  const el = detectLanguage("init.el");
+
+  it("is detected from .el", () => {
+    expect(el.name).toBe("elisp");
+  });
+
+  it("scores definition forms highly", () => {
+    const lines = [
+      "(defun my-fn () (interactive) 1)",
+      "(defcustom my-opt nil \"doc\" :type 'boolean)",
+      "(defvar my-var 1)",
+      "(define-minor-mode my-mode \"doc\" :lighter \" M\")",
+      "(use-package magit :ensure t)",
+      "(cl-defun my-cl-fn (&key a) a)",
+    ];
+    const signal = computeSignal(lines, el);
+    for (const s of signal) expect(s).toBeGreaterThanOrEqual(0.7);
+  });
+
+  it("does not open a string at the ?\\\" character literal", () => {
+    const signal = computeSignal(['(defconst q ?\\") (defun z () 1)'], el);
+    expect(signal[0]).toBeGreaterThanOrEqual(1.5);
+  });
+});
+
+describe("block comment opener inside a line comment", () => {
+  it("does not open a block comment from /* inside a // comment (TS)", () => {
+    const tsLang = detectLanguage("test.ts");
+    const lines = ["foo(); // see /* this", "export class Foo {}"];
+    const signal = computeSignal(lines, tsLang);
+    expect(signal[1]).toBeGreaterThanOrEqual(1.0);
+  });
+
+  it("does not open a docstring from triple quotes inside a # comment (Python)", () => {
+    const pyLang = detectLanguage("test.py");
+    const lines = ['x = 1  # """', "class Foo: pass"];
+    const signal = computeSignal(lines, pyLang);
+    expect(signal[1]).toBeGreaterThanOrEqual(1.0);
+  });
+});

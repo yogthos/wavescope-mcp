@@ -80,3 +80,14 @@ describe("getFileContext — caching", () => {
     }
   });
 });
+
+describe("server metadata", () => {
+  it("reports the package.json version, not a hardcoded one", async () => {
+    const { __test_serverVersion } = await import("./index.js");
+    const { readFile } = await import("node:fs/promises");
+    const pkg = JSON.parse(
+      await readFile(new URL("../package.json", import.meta.url), "utf-8"),
+    );
+    expect(__test_serverVersion).toBe(pkg.version);
+  });
+});
