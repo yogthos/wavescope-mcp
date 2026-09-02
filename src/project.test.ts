@@ -514,3 +514,31 @@ describe("ProjectIndex — .gitignore globstar (Round 2)", () => {
     }
   });
 });
+
+describe("ProjectIndex — Lisp-family files are discovered", () => {
+  const dir = join(tmpdir(), `wavescope-lisp-${Date.now()}`);
+
+  beforeAll(async () => {
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "core.scm"), "(define (f x) x)\n");
+    await writeFile(join(dir, "app.lisp"), "(defun g (x) x)\n");
+    await writeFile(join(dir, "init.el"), "(defun h (x) x)\n");
+    await writeFile(join(dir, "main.rkt"), "#lang racket\n(define (k x) x)\n");
+  });
+
+  afterAll(async () => {
+    await rm(dir, { recursive: true, force: true });
+    __test_clearProjectCache();
+  });
+
+  it("indexes .scm, .lisp, .el and .rkt files", async () => {
+    __test_clearProjectCache();
+    const project = await ProjectIndex.load(dir);
+    const files = project.listFiles().sort();
+    expect(files).toEqual(["app.lisp", "core.scm", "init.el", "main.rkt"]);
+    expect(project.getFile("core.scm")?.language.name).toBe("scheme");
+    expect(project.getFile("app.lisp")?.language.name).toBe("lisp");
+    expect(project.getFile("init.el")?.language.name).toBe("elisp");
+    expect(project.getFile("main.rkt")?.language.name).toBe("scheme");
+  });
+});

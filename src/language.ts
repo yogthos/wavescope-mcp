@@ -21,6 +21,30 @@ export interface LanguageConfig {
    * (for Clojure-style (comment ...) forms with nested S-expressions).
    */
   blockCommentUsesParenDepth?: boolean;
+  /**
+   * If true, block comments nest: every `blockCommentStart` inside a block
+   * comment increments depth and every `blockCommentEnd` decrements it
+   * (Scheme / Common Lisp `#| ... #| ... |# ... |#`).
+   */
+  blockCommentNests?: boolean;
+  /**
+   * Characters that open and close a string literal. Defaults to
+   * `"`, `'` and backtick. Lisps set this to just `"` because `'` is the
+   * quote reader macro and backtick is quasiquote / syntax-quote.
+   */
+  stringDelimiters?: string[];
+  /**
+   * If true, a backslash outside a string literal escapes the next
+   * character — Clojure `\"` / `\(`, Scheme `#\"`, Emacs Lisp `?\"`.
+   * Without this a `\"` char literal would open a phantom string that
+   * masks the rest of the line.
+   */
+  backslashCharLiterals?: boolean;
+  /**
+   * Language family, used by label inference. `"lisp"` enables the
+   * generic `(def* name ...)` / `(define* name ...)` labelling rule.
+   */
+  family?: "lisp";
 }
 
 // ─── Base keyword sets ───────────────────────────────────────
@@ -173,6 +197,8 @@ const rustConfig: LanguageConfig = {
   blockCommentEnd: "*/",
   indentWeight: 0.15,
   decoratorWeight: 0.4,
+  // `'a` is a lifetime, not a string delimiter.
+  stringDelimiters: ['"'],
 };
 
 const javaConfig: LanguageConfig = {
@@ -350,6 +376,15 @@ const scalaConfig: LanguageConfig = {
   decoratorWeight: 0.5,
 };
 
+const lispReaderDefaults: Pick<
+  LanguageConfig,
+  "stringDelimiters" | "backslashCharLiterals" | "family"
+> = {
+  stringDelimiters: ['"'],
+  backslashCharLiterals: true,
+  family: "lisp",
+};
+
 const clojureConfig: LanguageConfig = {
   name: "clojure",
   extensions: [".clj", ".cljs", ".cljc", ".edn"],
@@ -390,6 +425,208 @@ const clojureConfig: LanguageConfig = {
   indentWeight: 0.12,
   decoratorWeight: 0.0,
   blockCommentUsesParenDepth: true,
+  ...lispReaderDefaults,
+};
+
+// ─── Scheme / Common Lisp / Emacs Lisp ───────────────────────
+//
+// Shared reader conventions across the Lisp family: only `"` delimits a
+// string (`'` is quote, backtick is quasiquote), a backslash outside a
+// string introduces a character literal, and `;` starts a line comment.
+// Note the tokenizer in signal.ts splits on `*`, so `let*` / `letrec*`
+// arrive as `let` / `letrec` and need no separate entries.
+
+const schemeConfig: LanguageConfig = {
+  name: "scheme",
+  extensions: [".scm", ".ss", ".sld", ".sls", ".sps", ".rkt"],
+  structuralKeywords: {
+    define: 0.9,
+    "define-syntax": 0.9,
+    "define-syntax-rule": 0.9,
+    "define-record-type": 0.9,
+    "define-struct": 0.9,
+    struct: 0.9,
+    "define-class": 0.9,
+    "define-generic": 0.9,
+    "define-method": 0.8,
+    "define-macro": 0.9,
+    "define-values": 0.7,
+    "define-module": 0.6,
+    "define-library": 0.6,
+    "define-public": 0.9,
+    "define-inline": 0.9,
+    "define-constant": 0.7,
+    "syntax-rules": 0.6,
+    "syntax-case": 0.6,
+    "let-syntax": 0.4,
+    "letrec-syntax": 0.4,
+    lang: 0.6,
+    module: 0.6,
+    library: 0.6,
+    "use-modules": 0.6,
+    require: 0.6,
+    provide: 0.6,
+    import: 0.6,
+    export: 0.6,
+    include: 0.5,
+    load: 0.5,
+    lambda: 0.4,
+    "case-lambda": 0.5,
+    let: 0.2,
+    letrec: 0.3,
+    "let-values": 0.3,
+    "receive": 0.3,
+    if: 0.3,
+    cond: 0.3,
+    case: 0.3,
+    when: 0.3,
+    unless: 0.3,
+    do: 0.3,
+    begin: 0.2,
+    "set!": 0.2,
+    guard: 0.3,
+    "dynamic-wind": 0.3,
+    "with-exception-handler": 0.3,
+    "call-with-current-continuation": 0.3,
+    "call-with-values": 0.3,
+    delay: 0.2,
+    "define-record-printer": 0.5,
+  },
+  commentPrefixes: [";"],
+  blockCommentStart: "#|",
+  blockCommentEnd: "|#",
+  indentWeight: 0.12,
+  decoratorWeight: 0.0,
+  blockCommentNests: true,
+  ...lispReaderDefaults,
+};
+
+const lispConfig: LanguageConfig = {
+  name: "lisp",
+  extensions: [".lisp", ".lsp", ".cl", ".asd"],
+  structuralKeywords: {
+    defun: 0.9,
+    defmacro: 0.9,
+    defclass: 1.0,
+    defstruct: 0.9,
+    defgeneric: 0.9,
+    defmethod: 0.8,
+    deftype: 0.7,
+    defvar: 0.7,
+    defparameter: 0.7,
+    defconstant: 0.7,
+    defsetf: 0.6,
+    defpackage: 0.6,
+    "in-package": 0.6,
+    defsystem: 0.7,
+    "define-condition": 0.9,
+    "define-modify-macro": 0.6,
+    "define-compiler-macro": 0.7,
+    "define-symbol-macro": 0.6,
+    "define-method-combination": 0.6,
+    "define-setf-expander": 0.6,
+    require: 0.5,
+    "use-package": 0.5,
+    export: 0.5,
+    import: 0.5,
+    declaim: 0.3,
+    "eval-when": 0.4,
+    lambda: 0.4,
+    flet: 0.6,
+    labels: 0.6,
+    macrolet: 0.6,
+    let: 0.2,
+    if: 0.3,
+    when: 0.3,
+    unless: 0.3,
+    cond: 0.3,
+    case: 0.3,
+    ecase: 0.3,
+    typecase: 0.3,
+    etypecase: 0.3,
+    loop: 0.3,
+    do: 0.3,
+    dolist: 0.3,
+    dotimes: 0.3,
+    "handler-case": 0.3,
+    "handler-bind": 0.3,
+    "restart-case": 0.3,
+    "unwind-protect": 0.3,
+    "ignore-errors": 0.2,
+    "with-open-file": 0.3,
+    "with-slots": 0.2,
+    "with-accessors": 0.2,
+    progn: 0.1,
+    block: 0.2,
+    return: 0.2,
+    "return-from": 0.2,
+  },
+  commentPrefixes: [";"],
+  blockCommentStart: "#|",
+  blockCommentEnd: "|#",
+  indentWeight: 0.12,
+  decoratorWeight: 0.0,
+  blockCommentNests: true,
+  ...lispReaderDefaults,
+};
+
+const elispConfig: LanguageConfig = {
+  name: "elisp",
+  extensions: [".el"],
+  structuralKeywords: {
+    defun: 0.9,
+    defmacro: 0.9,
+    defsubst: 0.8,
+    defvar: 0.7,
+    "defvar-local": 0.7,
+    defconst: 0.7,
+    defcustom: 0.8,
+    defgroup: 0.8,
+    defface: 0.7,
+    defalias: 0.5,
+    "cl-defun": 0.9,
+    "cl-defmacro": 0.9,
+    "cl-defstruct": 0.9,
+    "cl-defgeneric": 0.9,
+    "cl-defmethod": 0.8,
+    "cl-deftype": 0.7,
+    "define-minor-mode": 0.9,
+    "define-derived-mode": 0.9,
+    "define-generic-mode": 0.9,
+    "define-globalized-minor-mode": 0.9,
+    "define-advice": 0.7,
+    "define-key": 0.3,
+    "use-package": 0.7,
+    require: 0.6,
+    provide: 0.6,
+    autoload: 0.5,
+    lambda: 0.4,
+    let: 0.2,
+    if: 0.3,
+    when: 0.3,
+    unless: 0.3,
+    cond: 0.3,
+    pcase: 0.3,
+    while: 0.3,
+    dolist: 0.3,
+    dotimes: 0.3,
+    "condition-case": 0.3,
+    "unwind-protect": 0.3,
+    "save-excursion": 0.2,
+    "save-restriction": 0.2,
+    "with-eval-after-load": 0.5,
+    "add-hook": 0.3,
+    interactive: 0.2,
+  },
+  commentPrefixes: [";"],
+  // Emacs Lisp has no block comment syntax; `#|` cannot occur in valid
+  // elisp so these delimiters are inert but keep the config uniform.
+  blockCommentStart: "#|",
+  blockCommentEnd: "|#",
+  indentWeight: 0.12,
+  decoratorWeight: 0.0,
+  blockCommentNests: true,
+  ...lispReaderDefaults,
 };
 
 const genericConfig: LanguageConfig = {
@@ -418,6 +655,9 @@ const configs: LanguageConfig[] = [
   kotlinConfig,
   scalaConfig,
   clojureConfig,
+  schemeConfig,
+  lispConfig,
+  elispConfig,
   genericConfig,
 ];
 
@@ -435,6 +675,9 @@ export {
   kotlinConfig,
   scalaConfig,
   clojureConfig,
+  schemeConfig,
+  lispConfig,
+  elispConfig,
   genericConfig,
 };
 

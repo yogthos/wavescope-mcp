@@ -72,7 +72,9 @@ export class FileContext {
 
   constructor(filename: string, content: string) {
     this.filename = filename;
-    this.lines = content.split("\n");
+    // Normalise CRLF so Windows-authored files don't leak `\r` into band
+    // content and labels.
+    this.lines = content.split(/\r?\n/);
 
     // Preserve trailing newline: if content ends with \n, ignore the empty last line
     if (content.endsWith("\n") && this.lines[this.lines.length - 1] === "") {
@@ -376,6 +378,11 @@ export class FileContext {
     // Also keep whitespace-split tokens as fallback for label reading
     const wsTokens = line.split(/\s+/);
 
+    if (this.language.family === "lisp") {
+      const lispLabel = this.inferLispLabel(line, tokens);
+      if (lispLabel) return lispLabel;
+    }
+
     if (this.language.name === "python") {
       if (wsTokens[0] === "class") return `class ${wsTokens[1]?.replace(":", "")}`;
       if (wsTokens[0] === "def") return `def ${wsTokens[1]?.split("(")[0]}`;
@@ -468,6 +475,25 @@ export class FileContext {
     }
 
     return line.substring(0, 50);
+  }
+
+  /**
+   * Label rule shared by the Lisp family (Clojure, Scheme, Common Lisp,
+   * Emacs Lisp): a form whose head is a definition-style symbol — `def*`,
+   * `define*`, `cl-def*`, or any keyword the language config weights at
+   * >= 0.6 (ns, defpackage, module, require, reify, ...) — is labelled
+   * `head name`. Anything else falls through to the generic rules.
+   */
+  private inferLispLabel(line: string, tokens: string[]): string | null {
+    if (line.startsWith("#lang")) return line.substring(0, 50);
+    const head = tokens[0];
+    if (!head) return null;
+    const kw = this.language.structuralKeywords;
+    const weight = Object.hasOwn(kw, head) ? kw[head] : 0;
+    const isDefinition = /^(cl-)?def/.test(head) || weight >= 0.6;
+    if (!isDefinition) return null;
+    const name = tokens[1];
+    return name ? `${head} ${name}` : head;
   }
 
   private buildMediumBand(
